@@ -1,0 +1,54 @@
+spring:
+  application:
+    name: plugin-attendance
+  config:
+    # Профили лежат в backend/assembly/config. Сам Spring Boot ищет их в config/ рабочей папки, то есть при запуске
+    # из backend/assembly; импорт находит их и при запуске из backend, например из IDE с настройками по умолчанию.
+    import: optional:file:./assembly/config/
+
+server:
+  port: 8081
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, info
+
+attendance:
+  # Откуда брать события звонка: streamapi (по умолчанию) или fake (генератор для разработки).
+  source: streamapi
+
+  tracking:
+    max-calls: 100
+    idle-timeout: 10m
+    failed-retention: 1m
+    cleanup-interval: 30s
+    ignored-participant-prefixes:
+      - streamapi-  # скрытый получатель медиа streamapi (prod и stage)
+      - EG_         # egress LiveKit (запись звонка)
+
+  streamapi:
+    # Снаружи стенда; внутри docker-сети стенда: nginx:19090 и plaintext: true.
+    target: calls.vareonix.cc:443
+    plaintext: false
+    # Дополнительные заголовки подписки: metadata.<заголовок>. Без cookie stage запросы уходят в prod;
+    # cookie задаёт профиль stage (config/application-stage.yml модуля assembly).
+    keepalive-time: 6m
+    keepalive-timeout: 20s
+    reconnect-min-delay: 1s
+    reconnect-max-delay: 30s
+
+  result-gateway:
+    # Куда публикуется сводка. Для разработки — mock на WireMock: gradlew resultGatewayMock.
+    url: http://localhost:8089
+    # Куда Result Gateway сообщает о доставке; по умолчанию /platform/deliveries этого процесса на localhost.
+    # callback-url: http://host.docker.internal:8081/platform/deliveries
+    connect-timeout: 2s
+    read-timeout: 5s
+
+  fake:
+    connect-delay: 300ms
+    initial-participants: 3
+    event-interval: 6s
+    max-participants: 10

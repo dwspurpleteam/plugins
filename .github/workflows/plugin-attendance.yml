@@ -1,0 +1,16 @@
+name: plugin-attendance
+
+on:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    # Gradle-сборка в backend собирает и фронтенд: Node.js скачивает сам Gradle.
+    uses: ./.github/workflows/gradle-plugin.yml
+    with:
+      project-dir: plugin-attendance/backend

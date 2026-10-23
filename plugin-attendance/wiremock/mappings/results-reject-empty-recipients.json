@@ -1,0 +1,21 @@
+{
+  "name": "Result Gateway: отклонить результат без адресатов",
+  "priority": 1,
+  "request": {
+    "method": "POST",
+    "url": "/v1/results",
+    "bodyPatterns": [
+      { "matchesJsonPath": { "expression": "$.recipients", "equalToJson": "[]" } }
+    ]
+  },
+  "response": {
+    "status": 422,
+    "headers": { "Content-Type": "application/json" },
+    "jsonBody": {
+      "messageId": "{{jsonPath request.body '$.messageId'}}",
+      "status": "REJECTED",
+      "reason": "Пустой список адресатов: результат некому доставить"
+    },
+    "transformers": ["response-template"]
+  }
+}
