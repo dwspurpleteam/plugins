@@ -14,6 +14,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -81,6 +82,7 @@ public class StreamApiEventSource implements EventSource, DisposableBean {
         this.properties = properties;
         this.clock = clock;
         this.extraHeaders = toMetadata(properties.metadata());
+        log.info("Event source: streamapi {}", describe());
     }
 
     static ManagedChannel createChannel(StreamApiProperties properties) {
@@ -101,7 +103,10 @@ public class StreamApiEventSource implements EventSource, DisposableBean {
 
     @Override
     public String describe() {
-        return properties.target() + (properties.plaintext() ? " (без TLS)" : " (TLS)");
+        // Заголовки видны по именам: без cookie stage подписка тихо уходит в prod. Значения не показываем, это секреты.
+        String headers = properties.metadata().keySet().stream().sorted().collect(Collectors.joining(", "));
+        return properties.target() + " (" + (properties.plaintext() ? "без TLS" : "TLS")
+                + (headers.isEmpty() ? ", без доп. заголовков" : ", заголовки: " + headers) + ")";
     }
 
     @Override

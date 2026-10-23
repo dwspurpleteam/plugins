@@ -1,9 +1,16 @@
-import type { CSSProperties } from 'react';
-import type { ApiError } from './api';
+import { type CSSProperties, useState } from 'react';
+import { ApiError, publishSummary } from './api';
 import { type LaunchContext, readContext } from './context';
 import { type ParticipantLabel, labelFor } from './participants';
-import { formatDuration, formatGap, formatTime, plural } from './time';
-import type { CallSnapshot, CallStatus, Participant } from './types';
+import { formatDuration, formatGap, formatTime, formatTimeSeconds, plural } from './time';
+import type {
+  CallSnapshot,
+  CallStatus,
+  DeliveredSummary,
+  Participant,
+  Publication,
+  PublicationStatus,
+} from './types';
 import { useNow } from './useNow';
 import { useSnapshot } from './useSnapshot';
 
@@ -45,18 +52,109 @@ function Attendance({ callId, context }: { callId: string; context: LaunchContex
             {notice.text}
           </p>
         ))}
+        {snapshot?.summary.delivered && <DeliveredCard delivered={snapshot.summary.delivered} />}
         {snapshot ? (
           <Lists snapshot={snapshot} now={now} you={context.participantId} />
         ) : (
           !error && <p className="empty">Загрузка…</p>
         )}
       </main>
+      {snapshot && (
+        <PublishBar callId={callId} publishedBy={context.participantId} fromServer={snapshot.summary.publication} />
+      )}
       <footer className="foot" title="Идентификатор звонка (SID комнаты) и имя комнаты">
         {callId}
         {context.roomId && ` · ${context.roomId}`}
       </footer>
     </div>
   );
+}
+
+/** Сводка, доставленная через Result Gateway: так её видят участники звонка. */
+function DeliveredCard({ delivered }: { delivered: DeliveredSummary }) {
+  const { summary } = delivered;
+  return (
+    <section className="summary" aria-label="Опубликованная сводка">
+      <div className="summary-head">
+        <span>Сводка на {formatTime(summary.composedAt)}</span>
+        <span>ревизия {delivered.revision}</span>
+      </div>
+      <p className="summary-main">
+        В звонке {summary.present}, покинули {summary.left}
+      </p>
+      <p className="meta">
+        Доставлена в {formatTimeSeconds(delivered.deliveredAt)}, получателей: {delivered.recipients}
+        {summary.publishedBy && ` · опубликовал(а) ${labelFor(summary.publishedBy).name}`}
+      </p>
+    </section>
+  );
+}
+
+const PUBLICATION: Record<PublicationStatus, { text: string; tone: string }> = {
+  SENDING: { text: 'отправляется в Result Gateway…', tone: 'muted' },
+  ACCEPTED: { text: 'принята, ждём доставки…', tone: 'muted' },
+  DELIVERED: { text: 'доставлена', tone: 'ok' },
+  REJECTED: { text: 'отклонена', tone: 'err' },
+  FAILED: { text: 'не отправлена', tone: 'err' },
+};
+
+/** Кнопка публикации и статус последней публикации: из ответа на нажатие или из опроса, что новее. */
+function PublishBar({
+  callId,
+  publishedBy,
+  fromServer,
+}: {
+  callId: string;
+  publishedBy: string | null;
+  fromServer: Publication | null;
+}) {
+  const [pending, setPending] = useState(false);
+  const [local, setLocal] = useState<Publication | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const shown = latest(fromServer, local);
+
+  const publish = async () => {
+    setPending(true);
+    setError(null);
+    try {
+      setLocal(await publishSummary(callId, publishedBy));
+    } catch (failure) {
+      setError(failure instanceof ApiError ? failure.message : 'Не удалось опубликовать сводку');
+    } finally {
+      setPending(false);
+    }
+  };
+
+  const status = shown ? PUBLICATION[shown.status] : null;
+  return (
+    <div className="actions">
+      <button type="button" className="button" onClick={() => void publish()} disabled={pending}>
+        {pending ? 'Публикуем…' : 'Опубликовать сводку'}
+      </button>
+      {error ? (
+        <span className="publication err">{error}</span>
+      ) : (
+        shown &&
+        status && (
+          <span className={`publication ${status.tone}`} title={shown.messageId}>
+            Ревизия {shown.revision} {status.text}
+            {shown.status === 'DELIVERED' && ` в ${formatTimeSeconds(shown.updatedAt)}`}
+            {shown.reason && `: ${shown.reason}`}
+          </span>
+        )
+      )}
+    </div>
+  );
+}
+
+function latest(a: Publication | null, b: Publication | null): Publication | null {
+  if (!a || !b) {
+    return a ?? b;
+  }
+  if (a.revision !== b.revision) {
+    return a.revision > b.revision ? a : b;
+  }
+  return Date.parse(a.updatedAt) >= Date.parse(b.updatedAt) ? a : b;
 }
 
 const STATUS: Record<CallStatus, { text: string; tone: string }> = {

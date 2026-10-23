@@ -1,6 +1,7 @@
 package ru.itmo.plugins.attendance.events.streamapi;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.io.IOException;
 import java.time.Clock;
@@ -136,6 +137,21 @@ class StreamApiEventSourceTest {
         assertThat(source.reconnectDelayMillis(1)).isBetween(32L, 48L);
         assertThat(source.reconnectDelayMillis(10)).isBetween(80L, 100L);
         assertThat(source.reconnectDelayMillis(1_000)).isBetween(80L, 100L);
+    }
+
+    @Test
+    void describeNamesExtraHeadersButNotTheirValues() {
+        assertThat(source.describe()).isEqualTo("in-process (без TLS, заголовки: cookie)");
+        assertThat(source.describe()).doesNotContain("secret");
+    }
+
+    @Test
+    void rejectsUnreplacedSecretPlaceholder() {
+        assertThatThrownBy(() -> new StreamApiProperties(
+                "calls.example:443", false, Map.of("cookie", "composer_stage=<secret>:stage"),
+                Duration.ofMinutes(6), Duration.ofSeconds(20), Duration.ofSeconds(1), Duration.ofSeconds(30)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("attendance.streamapi.metadata.cookie still contains <secret>");
     }
 
     private static SubscribeEventsResponse response(String id, String type, String participantId) {

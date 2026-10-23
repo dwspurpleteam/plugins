@@ -18,6 +18,7 @@ dependencies {
     implementation(libs.spring.boot.starter.actuator)
 
     testImplementation(libs.spring.boot.starter.test)
+    testImplementation(libs.wiremock.standalone)
     testRuntimeOnly(libs.junit.platform.launcher)
 }
 
@@ -98,6 +99,25 @@ tasks.jar {
     enabled = false
 }
 
+// Mock Result Gateway: WireMock с маппингами из ../wiremock. Отдельно от приложения, как настоящий Result Gateway.
+val wiremockDir = layout.settingsDirectory.dir("../wiremock")
+val wiremock = configurations.create("wiremock")
+
+dependencies {
+    wiremock(libs.wiremock.standalone)
+}
+
+tasks.register<JavaExec>("resultGatewayMock") {
+    group = "application"
+    description = "Запускает mock Result Gateway (WireMock) на порту 8089."
+    classpath = wiremock
+    mainClass = "wiremock.Run"
+    args("--port", "8089", "--root-dir", wiremockDir.asFile.path, "--verbose", "--disable-banner")
+}
+
 tasks.test {
     useJUnitPlatform()
+    // Тест приложения поднимает WireMock с теми же маппингами, что и resultGatewayMock.
+    inputs.dir(wiremockDir)
+    systemProperty("wiremock.root", wiremockDir.asFile.path)
 }

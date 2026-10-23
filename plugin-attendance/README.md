@@ -1,11 +1,12 @@
 # plugin-attendance
 
-Плагин посещаемости для звонков. Версия 0.1 показывает, кто сейчас в звонке и кто из него вышел, по событиям [streamapi](https://github.com/dwspurpleteam/streamapi).
+Плагин посещаемости для звонков. Версия 0.1 показывает, кто сейчас в звонке и кто из него вышел, по событиям [streamapi](https://github.com/dwspurpleteam/streamapi), и публикует сводку посещаемости через Result Gateway платформы.
 
 ```
 plugin-attendance/
   frontend/   страница плагина в iframe: React, Vite, TypeScript
   backend/    сервер плагина: Java 25, Spring Boot 4.1; собирает frontend и отдаёт его вместе с API
+  wiremock/   mock Result Gateway для разработки: маппинги WireMock
 ```
 
 ```
@@ -13,11 +14,16 @@ iframe в Meet ── GET api/calls/{callId}/participants, раз в 2 с ──
                                                                       │ gRPC EventService.Subscribe
                                                                       ▼
                                               вебхуки LiveKit ──► streamapi ──► NATS JetStream
+
+iframe в Meet ── POST api/calls/{callId}/summary ──► backend ── POST /v1/results ──────────────► Result Gateway
+                                                        ▲                                        (mock: WireMock)
+                                                        └── POST /platform/deliveries, через 1–3 с ─────┘
 ```
 
 - **frontend** — самостоятельный npm-проект. Его сборку `frontend/dist` Gradle кладёт в jar backend, поэтому страницу и API отдаёт один процесс.
 - **backend** — самостоятельный Gradle-проект со своим wrapper и двумя модулями: `core` — код плагина, `assembly` — main class, настройки и исполняемый jar. Первый запрос по `callId` подписывает плагин на `participant.joined`, `participant.left` и `call.ended`, состав звонка хранится в памяти. Если 10 минут никто не открывает плагин в звонке, отслеживание останавливается.
 - **Источник событий** — `streamapi` (по умолчанию) или `fake`, генератор для разработки без сети.
+- **Сводка** — кнопка «Опубликовать сводку» отправляет число участников в звонке и вышедших в Result Gateway. Настоящего Result Gateway ещё нет, его заменяет WireMock: он принимает сводку и через 1–3 с сообщает плагину о доставке. Подробнее — в разделе [Сводка через Result Gateway](#сводка-через-result-gateway).
 
 ## Требования
 
@@ -39,7 +45,13 @@ cd plugins/plugin-attendance/backend
 ./gradlew bootRun --args='--attendance.source=fake'
 ```
 
-Первый запуск занимает несколько минут: Gradle скачивает зависимости и Node. Потом откройте одну из страниц:
+Первый запуск занимает несколько минут: Gradle скачивает зависимости и Node. Для кнопки «Опубликовать сводку» во втором терминале запустите mock Result Gateway, без него публикация завершится статусом «не отправлена»:
+
+```shell
+.\gradlew.bat resultGatewayMock   # Windows; Linux, macOS: ./gradlew resultGatewayMock
+```
+
+Потом откройте одну из страниц:
 
 - <http://localhost:8081/dev-host.html> — плагин в iframe с `sandbox="allow-scripts"`, как в OpenVidu Meet, и кнопки «Вошёл», «Вышел», «Завершить звонок» и «Обрыв связи».
 - <http://localhost:8081/?callId=demo> — страница плагина напрямую.
@@ -64,7 +76,7 @@ Invoke-RestMethod -Method Post http://localhost:8081/dev/calls/demo/events -Cont
    - Одно из первых входящих бинарных сообщений (JoinResponse) содержит SID. Переключите просмотр сообщения на UTF-8 и найдите `RM_`.
    - Либо скопируйте сообщение как Base64 и выполните в консоли `atob('<base64>').match(/RM_\w+/)[0]`.
 3. Откройте <http://localhost:8081/dev-host.html?callId=RM_…>.
-4. Заходите в звонок и выходите из него со второй вкладки или с телефона: список меняется через одну–три секунды.
+4. Заходите в звонок и выходите из него со второй вкладки или с телефона: список меняется через одну–три секунды. Звонок и подписка должны быть в одном окружении: звонок на stage виден только с [профилем](#профили) `stage`.
 
 Другие окружения:
 
@@ -72,6 +84,58 @@ Invoke-RestMethod -Method Post http://localhost:8081/dev/calls/demo/events -Cont
 - **локальный streamapi**: `--attendance.streamapi.target=localhost:19090 --attendance.streamapi.plaintext=true`.
 
 Несколько параметров передаются через пробел: `--args='--server.port=8090 --attendance.source=fake'`.
+
+## Сводка через Result Gateway
+
+По [спецификации платформы](https://github.com/dwspurpleteam/specs) backend плагина не пишет в звонок сам: результаты и команды он отправляет в Result Gateway. Тот проверяет сообщение, адресатов и лимиты и доставляет результат участникам. Плагин посещаемости публикует так сводку.
+
+1. Кнопка «Опубликовать сводку» вызывает `POST api/calls/{callId}/summary`.
+2. Backend собирает сводку по текущему составу звонка и отправляет её в `POST <attendance.result-gateway.url>/v1/results`. Адресаты — все, кто сейчас в звонке, ревизия растёт с каждой публикацией. Запрос UI ждёт ответа Result Gateway о приёме.
+3. Позже Result Gateway сообщает о доставке запросом `POST /platform/deliveries`. Более старая ревизия, чем уже доставленная, отбрасывается: доставки могут прийти в любом порядке.
+4. Последняя доставленная сводка и статус последней публикации приходят в ответе `participants`. Сводку видят все, у кого открыт плагин в этом звонке.
+
+Сообщение в Result Gateway — формат `call.result` из спецификации:
+
+```json
+{
+  "type": "call.result",
+  "messageId": "0b9c2a52-…",
+  "callId": "RM_xxx",
+  "recipients": ["anna-0123456789abcde", "boris-zzzzzzzzzzzzzzz"],
+  "key": "attendance.summary",
+  "revision": 3,
+  "payload": {
+    "composedAt": "2026-10-22T11:20:00Z",
+    "trackingSince": "2026-10-22T11:05:00Z",
+    "present": 2,
+    "left": 1,
+    "publishedBy": "anna-0123456789abcde"
+  }
+}
+```
+
+Адрес для отчёта о доставке backend передаёт заголовком `X-Callback-Url`. Отчёт — исходное сообщение целиком и статус: `{"status": "DELIVERED", "reason": null, "message": {…}}`, при отказе `REJECTED` и причина.
+
+Статусы публикации:
+
+| Статус | Что произошло |
+| --- | --- |
+| `SENDING` | Сообщение отправляется в Result Gateway |
+| `ACCEPTED` | Result Gateway принял сообщение (2xx), ждём отчёта о доставке |
+| `DELIVERED` | Пришёл отчёт о доставке |
+| `REJECTED` | Result Gateway отклонил сообщение (4xx или отчёт с отказом), причина в `reason` |
+| `FAILED` | Result Gateway недоступен, не ответил вовремя или ответил 5xx |
+
+### Mock Result Gateway
+
+Задача `resultGatewayMock` запускает WireMock на порту 8089 с маппингами из `wiremock/mappings/`:
+
+- `results-accept.json` — отвечает `202` и через 1–3 с отправляет отчёт `DELIVERED` по адресу из `X-Callback-Url`;
+- `results-reject-empty-recipients.json` — отвечает `422` на сообщение с пустым `recipients`, например если публиковать после завершения звонка.
+
+Полученные сообщения видны в журнале WireMock: <http://localhost:8089/__admin/requests>, а с `--verbose` — и в консоли. Чтобы проверить статус `FAILED`, остановите mock (Ctrl+C). Тот же WireMock можно запустить и без Gradle: `java -jar wiremock-standalone-3.13.2.jar --port 8089 --root-dir plugin-attendance/wiremock`.
+
+Если WireMock работает не на той машине, что backend, например в Docker, задайте адрес для отчёта явно: `--attendance.result-gateway.callback-url=http://host.docker.internal:8081/platform/deliveries`.
 
 ## Сборка и запуск jar
 
@@ -108,23 +172,29 @@ cd plugins/plugin-attendance/frontend; npm run dev                # или св�
 | `attendance.tracking.max-calls` | `100` | Сколько звонков отслеживается одновременно |
 | `attendance.tracking.ignored-participant-prefixes` | `streamapi-`, `EG_` | Служебные участники: скрытый получатель streamapi, запись |
 | `attendance.fake.event-interval` | `6s` | Как часто генератор меняет состав; `0s` — только события из кнопок и запросов |
+| `attendance.result-gateway.url` | `http://localhost:8089` | Адрес Result Gateway; по умолчанию mock из `resultGatewayMock` |
+| `attendance.result-gateway.callback-url` | `/platform/deliveries` этого процесса на localhost | Куда Result Gateway отправляет отчёт о доставке |
+| `attendance.result-gateway.connect-timeout` | `2s` | Сколько ждать соединения с Result Gateway |
+| `attendance.result-gateway.read-timeout` | `5s` | Сколько ждать ответа о приёме сообщения |
 
 ### Профили
 
 Настройки окружений лежат в `backend/assembly/config/application-<профиль>.yml`. Сейчас профиль один — `stage`, он задаёт cookie для подписки на streamapi stage. Без профиля backend работает с prod.
 
-Spring Boot читает эти файлы, только если профиль включён, а процесс запущен из папки `backend/assembly`:
+В git файл `application-stage.yml` лежит с заглушкой `<secret>`. Замените её на секрет окружения stage и не коммитьте эту правку. Пока заглушка на месте, backend с профилем `stage` не запустится и назовёт причину: иначе подписка молча ушла бы в prod.
 
-- `bootRun` запускается из этой папки, профиль передаётся аргументом: `--args='--spring.profiles.active=stage'`.
-- В IDE запускайте `AttendanceApplication` с рабочей папкой `backend/assembly` и аргументом `--spring.profiles.active=stage`.
-- Jar запускайте тоже из `backend/assembly`: `java -jar build/libs/plugin-attendance.jar --spring.profiles.active=stage`.
+Профиль включается аргументом `--spring.profiles.active=stage`: в `bootRun` — через `--args='--spring.profiles.active=stage'`, в IDE — полем Active profiles или тем же аргументом. Файл профиля находится, если процесс запущен из `backend` или из `backend/assembly`, так что подходят и `bootRun`, и запуск jar, и IDE с рабочей папкой по умолчанию.
+
+Какое окружение получилось, видно в `GET /api/info`, на странице `dev-host.html` и в логе при старте (`Event source: streamapi …`). Со stage там `заголовки: cookie`, без профиля — `без доп. заголовков`. Если плагин показывает «Онлайн», но вошедшие участники не появляются, проверьте первым делом это: подписка в prod на звонок stage принимается, но событий не получает.
 
 ## API backend
 
 | Запрос | Ответ |
 | --- | --- |
 | `GET /api/calls/{callId}/participants` | Состав звонка. Первый запрос запускает отслеживание |
-| `GET /api/info` | Источник событий и версия |
+| `POST /api/calls/{callId}/summary?participantId=…` | Публикует сводку через Result Gateway и возвращает статус публикации. `participantId` необязателен, он попадает в сводку как автор. Отказ и недоступность Result Gateway — это статусы `REJECTED` и `FAILED`, а не ошибки запроса |
+| `POST /platform/deliveries` | Отчёт Result Gateway о доставке. `404`, если звонок уже не отслеживается |
+| `GET /api/info` | Источник событий, адрес Result Gateway и версия |
 | `GET /actuator/health` | Проверка доступности |
 | `POST /dev/calls/{callId}/events` | Только в демо-режиме. Тело `{"type": "participant.joined", "participantId": "…"}`; без `participantId` войдёт случайный участник или выйдет случайный присутствующий. Типы: `participant.joined`, `participant.left`, `call.ended` |
 | `POST /dev/calls/{callId}/connection-loss?seconds=5` | Только в демо-режиме: имитация обрыва связи с источником |
@@ -142,9 +212,27 @@ Spring Boot читает эти файлы, только если профиль
   "gaps": [{ "from": "2026-10-22T11:07:03Z", "to": "2026-10-22T11:07:05Z" }],
   "serverTime": "2026-10-22T11:20:00.456Z",
   "present": [{ "participantId": "anna-0123456789abcde", "joinedAt": "2026-10-22T11:06:00Z", "leftAt": null }],
-  "left": [{ "participantId": "boris-zzzzzzzzzzzzzzz", "joinedAt": null, "leftAt": "2026-10-22T11:10:00Z" }]
+  "left": [{ "participantId": "boris-zzzzzzzzzzzzzzz", "joinedAt": null, "leftAt": "2026-10-22T11:10:00Z" }],
+  "summary": {
+    "publication": {
+      "messageId": "0b9c2a52-…",
+      "revision": 3,
+      "status": "DELIVERED",
+      "reason": null,
+      "requestedAt": "2026-10-22T11:20:00Z",
+      "updatedAt": "2026-10-22T11:20:02Z"
+    },
+    "delivered": {
+      "revision": 3,
+      "deliveredAt": "2026-10-22T11:20:02Z",
+      "recipients": 1,
+      "summary": { "composedAt": "2026-10-22T11:20:00Z", "trackingSince": "2026-10-22T11:05:00Z", "present": 1, "left": 1, "publishedBy": "anna-0123456789abcde" }
+    }
+  }
 }
 ```
+
+`summary.publication` и `summary.delivered` равны `null`, пока сводку не публиковали и пока ни одна публикация не доставлена.
 
 Возможные статусы:
 
@@ -177,6 +265,9 @@ Spring Boot читает эти файлы, только если профиль
 - Авторизации нет: состав звонка видит любой, кто знает `callId`.
 - Время событий LiveKit округлено до секунды. Вход и выход в одну и ту же секунду применяются в порядке прихода.
 - События, пришедшие во время обрыва связи со streamapi, теряются, и плагин предупреждает, что список может быть неточным.
+- Сводка отправляется в Result Gateway синхронно: если он медленный или недоступен, кнопка ждёт до `read-timeout`. Очереди и повторов пока нет.
+- В сообщении нет `activationId`: контекст запуска его пока не содержит. Сообщения и отчёты о доставке не подписаны, `POST /platform/deliveries` принимает отчёт от кого угодно.
+- Доставленную сводку видят все, у кого открыт плагин в звонке, а не только адресаты.
 
 ## Тесты
 
@@ -188,8 +279,8 @@ Spring Boot читает эти файлы, только если профиль
 
 Тесты покрывают:
 
-- в `core` — логику трекера и реестра звонков, а также gRPC-адаптер против in-process сервера, который ведёт себя как streamapi;
-- в `assembly` — приложение целиком в демо-режиме: страницу, CORS для sandbox-iframe и API.
+- в `core` — логику трекера и реестра звонков, статусы публикаций сводки, gRPC-адаптер против in-process сервера, который ведёт себя как streamapi, и HTTP-клиент Result Gateway против WireMock;
+- в `assembly` — приложение целиком в демо-режиме: страницу, CORS для sandbox-iframe, API и публикацию сводки через WireMock с маппингами из `wiremock/`.
 
 Отдельной команды для фронтенда нет: проверка типов TypeScript входит в его сборку (`npm run build`).
 
@@ -203,8 +294,11 @@ frontend/
 backend/
   core/                     код плагина, обычная библиотека
     src/main/java/ru/itmo/plugins/attendance/
-      api/                  REST: состав звонка, /api/info, /dev/* для демо-режима
-      tracking/             CallTracker — состав одного звонка, CallRegistry — какие звонки отслеживаются
+      api/                  REST: состав звонка, публикация сводки, /platform/deliveries, /api/info, /dev/* для демо-режима
+      tracking/             CallTracker — состав одного звонка, CallRegistry — какие звонки отслеживаются,
+                            SummaryBoard — публикации сводки звонка
+      summary/              SummaryPublisher — собирает сводку и отправляет её в Result Gateway
+      gateway/              ResultGateway и HTTP-клиент, формат сообщений и отчётов о доставке
       events/               EventSource и реализации: streamapi (gRPC) и fake
       config/               CORS для sandbox-iframe, проверки настроек
     src/main/proto/streamapi/v1/events.proto   копия контракта streamapi v1.1.0 с java-опциями
@@ -214,6 +308,8 @@ backend/
     src/main/resources/static/dev-host.html    страница «плагин в окне Meet» для демо-режима
     config/application-stage.yml               профиль stage: cookie для streamapi stage
   settings.gradle.kts, build.gradle.kts, gradle/libs.versions.toml, gradlew
+wiremock/
+  mappings/                 mock Result Gateway: приём сводки с отчётом о доставке, отказ без адресатов
 ```
 
 Версии зависимостей лежат в `backend/gradle/libs.versions.toml` (там же версия Node для сборки) и `frontend/package.json`. Версии gRPC и protobuf задаёт BOM Spring Boot.

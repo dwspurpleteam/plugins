@@ -1,0 +1,36 @@
+{
+  "name": "Result Gateway: принять результат и через 1–3 с сообщить плагину о доставке",
+  "request": {
+    "method": "POST",
+    "url": "/v1/results",
+    "headers": {
+      "Content-Type": { "contains": "application/json" },
+      "X-Callback-Url": { "matches": "https?://.+" }
+    },
+    "bodyPatterns": [
+      { "matchesJsonPath": "$.messageId" },
+      { "matchesJsonPath": "$.callId" }
+    ]
+  },
+  "response": {
+    "status": 202,
+    "headers": { "Content-Type": "application/json" },
+    "jsonBody": {
+      "messageId": "{{jsonPath request.body '$.messageId'}}",
+      "status": "ACCEPTED"
+    },
+    "transformers": ["response-template"]
+  },
+  "serveEventListeners": [
+    {
+      "name": "webhook",
+      "parameters": {
+        "method": "POST",
+        "url": "{{originalRequest.headers.[X-Callback-Url]}}",
+        "headers": { "Content-Type": "application/json" },
+        "body": "{\"status\": \"DELIVERED\", \"reason\": null, \"message\": {{{originalRequest.body}}} }",
+        "delay": { "type": "uniform", "lower": 1000, "upper": 3000 }
+      }
+    }
+  ]
+}

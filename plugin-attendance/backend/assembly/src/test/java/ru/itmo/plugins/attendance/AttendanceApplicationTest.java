@@ -1,5 +1,10 @@
 package ru.itmo.plugins.attendance;
 
+import static com.github.tomakehurst.wiremock.client.WireMock.equalTo;
+import static com.github.tomakehurst.wiremock.client.WireMock.matchingJsonPath;
+import static com.github.tomakehurst.wiremock.client.WireMock.postRequestedFor;
+import static com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo;
+import static com.github.tomakehurst.wiremock.core.WireMockConfiguration.options;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.io.IOException;
@@ -12,16 +17,27 @@ import java.util.function.Predicate;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
 
+import com.github.tomakehurst.wiremock.WireMockServer;
+
+import ru.itmo.plugins.attendance.tracking.AttendanceSummary;
 import ru.itmo.plugins.attendance.tracking.CallSnapshot;
 import ru.itmo.plugins.attendance.tracking.CallSnapshot.Participant;
 import ru.itmo.plugins.attendance.tracking.CallStatus;
+import ru.itmo.plugins.attendance.tracking.SummaryBoard.Publication;
+import ru.itmo.plugins.attendance.tracking.SummaryBoard.Status;
 import tools.jackson.databind.json.JsonMapper;
 
-/** Приложение целиком с фейковым источником: страница, CORS для sandbox-iframe и API. */
+/**
+ * Приложение целиком с фейковым источником: страница, CORS для sandbox-iframe и API. Result Gateway —
+ * WireMock с маппингами из {@code plugin-attendance/wiremock}, как у задачи {@code resultGatewayMock}.
+ */
 @SpringBootTest(
         webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
         properties = {
@@ -33,12 +49,23 @@ import tools.jackson.databind.json.JsonMapper;
 class AttendanceApplicationTest {
 
     private static final String ANNA = "anna-0123456789abcde";
+    private static final WireMockServer gateway = startGateway();
 
     private final HttpClient http = HttpClient.newHttpClient();
     private final JsonMapper json = JsonMapper.builder().build();
 
     @Value("${local.server.port}")
     private int port;
+
+    @DynamicPropertySource
+    static void resultGateway(DynamicPropertyRegistry registry) {
+        registry.add("attendance.result-gateway.url", gateway::baseUrl);
+    }
+
+    @AfterAll
+    static void stopGateway() {
+        gateway.stop();
+    }
 
     @Test
     void servesPluginPageAndAssetsToSandboxedIframe() throws Exception {
@@ -104,15 +131,55 @@ class AttendanceApplicationTest {
     }
 
     @Test
+    void publishesSummaryThroughResultGateway() throws Exception {
+        String participants = "/api/calls/RM_summary/participants";
+        await(participants, snapshot -> snapshot.status() == CallStatus.TRACKING);
+        post("/dev/calls/RM_summary/events", event("participant.joined"));
+        await(participants, snapshot -> !snapshot.present().isEmpty());
+
+        // Кнопка в sandbox-iframe: POST без тела с Origin: null.
+        HttpResponse<String> response = postWithoutBody("/api/calls/RM_summary/summary?participantId=" + ANNA, "null");
+        assertThat(response.statusCode()).isEqualTo(200);
+        assertThat(response.headers().firstValue("Access-Control-Allow-Origin")).hasValue("*");
+        Publication publication = json.readValue(response.body(), Publication.class);
+        assertThat(publication.status()).isEqualTo(Status.ACCEPTED);
+
+        // Mock сообщает о доставке через 1–3 с.
+        CallSnapshot delivered = await(participants, snapshot -> snapshot.summary().delivered() != null);
+        assertThat(delivered.summary().publication().status()).isEqualTo(Status.DELIVERED);
+        assertThat(delivered.summary().delivered().revision()).isEqualTo(publication.revision());
+        assertThat(delivered.summary().delivered().recipients()).isEqualTo(1);
+        assertThat(delivered.summary().delivered().summary())
+                .extracting(AttendanceSummary::present, AttendanceSummary::publishedBy)
+                .containsExactly(1, ANNA);
+        gateway.verify(postRequestedFor(urlEqualTo("/v1/results"))
+                .withRequestBody(matchingJsonPath("$.callId", equalTo("RM_summary")))
+                .withRequestBody(matchingJsonPath("$.recipients[0]", equalTo(ANNA))));
+    }
+
+    @Test
+    void resultGatewayRejectsSummaryWithoutRecipients() throws Exception {
+        await("/api/calls/RM_nobody/participants", snapshot -> snapshot.status() == CallStatus.TRACKING);
+
+        HttpResponse<String> response = postWithoutBody("/api/calls/RM_nobody/summary", null);
+
+        assertThat(response.statusCode()).isEqualTo(200);
+        Publication publication = json.readValue(response.body(), Publication.class);
+        assertThat(publication.status()).isEqualTo(Status.REJECTED);
+        assertThat(publication.reason()).contains("Пустой список адресатов");
+    }
+
+    @Test
     void infoNamesEventSource() throws Exception {
         HttpResponse<String> response = get("/api/info", null);
 
         assertThat(response.statusCode()).isEqualTo(200);
         assertThat(response.body()).contains("\"source\":\"fake\"");
+        assertThat(response.body()).contains("\"resultGateway\":\"" + gateway.baseUrl() + "/v1/results\"");
     }
 
     private CallSnapshot await(String path, Predicate<CallSnapshot> condition) throws Exception {
-        long deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
+        long deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos();
         CallSnapshot snapshot;
         do {
             snapshot = json.readValue(get(path, null).body(), CallSnapshot.class);
@@ -142,6 +209,22 @@ class AttendanceApplicationTest {
                 .POST(HttpRequest.BodyPublishers.ofString(body))
                 .build();
         return http.send(request, HttpResponse.BodyHandlers.ofString());
+    }
+
+    private HttpResponse<String> postWithoutBody(String path, String origin) throws IOException, InterruptedException {
+        HttpRequest.Builder request = HttpRequest.newBuilder(uri(path)).POST(HttpRequest.BodyPublishers.noBody());
+        if (origin != null) {
+            request.header("Origin", origin);
+        }
+        return http.send(request.build(), HttpResponse.BodyHandlers.ofString());
+    }
+
+    private static WireMockServer startGateway() {
+        WireMockServer server = new WireMockServer(options()
+                .dynamicPort()
+                .usingFilesUnderDirectory(System.getProperty("wiremock.root", "../../wiremock")));
+        server.start();
+        return server;
     }
 
     private URI uri(String path) {

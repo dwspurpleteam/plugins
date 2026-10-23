@@ -50,6 +50,7 @@ public final class CallTracker implements EventSource.Listener {
         }
     });
     private final Deque<CallSnapshot.Gap> gaps = new ArrayDeque<>();
+    private final SummaryBoard summary = new SummaryBoard();
 
     private CallStatus status = CallStatus.CONNECTING;
     private String statusMessage;
@@ -71,6 +72,10 @@ public final class CallTracker implements EventSource.Listener {
 
     public String callId() {
         return callId;
+    }
+
+    public SummaryBoard summary() {
+        return summary;
     }
 
     @Override
@@ -161,7 +166,7 @@ public final class CallTracker implements EventSource.Listener {
             gapList.add(new CallSnapshot.Gap(gapStartedAt, null));
         }
         return new CallSnapshot(callId, source, status, statusMessage, trackingSince, endedAt,
-                List.copyOf(gapList), clock.instant(), List.copyOf(present), List.copyOf(left));
+                List.copyOf(gapList), clock.instant(), List.copyOf(present), List.copyOf(left), summary.view());
     }
 
     synchronized CallStatus status() {

@@ -4,6 +4,13 @@ export function formatTime(iso: string): string {
   return timeFormat.format(new Date(iso));
 }
 
+const secondsFormat = new Intl.DateTimeFormat('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+/** С секундами: доставка через Result Gateway занимает секунды. */
+export function formatTimeSeconds(iso: string): string {
+  return secondsFormat.format(new Date(iso));
+}
+
 export function formatDuration(ms: number): string {
   const minutes = Math.floor(Math.max(0, ms) / 60_000);
   if (minutes < 1) {

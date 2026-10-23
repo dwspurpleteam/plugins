@@ -30,6 +30,7 @@ dependencies {
 
     testImplementation(libs.spring.boot.starter.test)
     testImplementation(libs.grpc.inprocess)
+    testImplementation(libs.wiremock.standalone)
     testRuntimeOnly(libs.junit.platform.launcher)
 }
 

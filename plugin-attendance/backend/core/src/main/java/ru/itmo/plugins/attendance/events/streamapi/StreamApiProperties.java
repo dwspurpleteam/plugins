@@ -27,11 +27,20 @@ public record StreamApiProperties(
         Duration reconnectMinDelay,
         Duration reconnectMaxDelay) {
 
+    static final String SECRET_PLACEHOLDER = "<secret>";
+
     public StreamApiProperties {
         if (target == null || target.isBlank()) {
             throw new IllegalArgumentException("attendance.streamapi.target must not be blank");
         }
         metadata = metadata == null ? Map.of() : Map.copyOf(metadata);
+        metadata.forEach((name, value) -> {
+            // Заглушка из файла профиля в git: с ней stage молча подписал бы плагин на prod.
+            if (value.contains(SECRET_PLACEHOLDER)) {
+                throw new IllegalArgumentException("attendance.streamapi.metadata." + name + " still contains "
+                        + SECRET_PLACEHOLDER + ": put the real value into config/application-<profile>.yml");
+            }
+        });
         PropertyChecks.positive(keepaliveTime, "attendance.streamapi.keepalive-time");
         PropertyChecks.positive(keepaliveTimeout, "attendance.streamapi.keepalive-timeout");
         PropertyChecks.positive(reconnectMinDelay, "attendance.streamapi.reconnect-min-delay");

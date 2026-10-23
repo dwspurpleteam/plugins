@@ -2,6 +2,7 @@ package ru.itmo.plugins.attendance.tracking;
 
 import java.time.Clock;
 import java.time.Instant;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
@@ -41,6 +42,11 @@ public class CallRegistry implements DisposableBean {
         }
         tracker.touch(clock.instant());
         return tracker;
+    }
+
+    /** Трекер звонка, если звонок отслеживается. В отличие от {@link #getOrStart}, не продлевает отслеживание. */
+    public Optional<CallTracker> find(String callId) {
+        return Optional.ofNullable(trackers.get(callId));
     }
 
     public int size() {

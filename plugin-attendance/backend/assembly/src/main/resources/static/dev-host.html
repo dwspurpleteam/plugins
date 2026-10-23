@@ -24,6 +24,8 @@
     p { margin: 0 0 12px; color: var(--muted); }
     code { font-family: ui-monospace, Consolas, monospace; font-size: .92em; }
     .layout { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start; }
+    /* Ширина задана явно: длинный текст в панелях не переносит колонку под окно плагина. */
+    .side { flex: 0 1 420px; min-width: 0; }
     .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px; width: min(420px, 100%); }
     .panel h2 { margin: 0 0 8px; font-size: 14px; }
     label { display: block; margin-bottom: 8px; font-size: 12px; color: var(--muted); }
@@ -52,7 +54,7 @@
               referrerpolicy="no-referrer"></iframe>
     </div>
 
-    <div>
+    <div class="side">
       <form class="panel" id="context">
         <h2>Контекст запуска</h2>
         <label>callId — SID комнаты LiveKit (RM_…), в демо-режиме любой
@@ -147,7 +149,7 @@
       .then((response) => response.json())
       .then((info) => {
         document.getElementById('source').textContent =
-          `Источник событий: ${info.source} — ${info.target}. Версия ${info.version}.`;
+          `Источник событий: ${info.source} — ${info.target}. Result Gateway: ${info.resultGateway}. Версия ${info.version}.`;
         document.getElementById('simulator').hidden = info.source !== 'fake';
       })
       .catch(() => {

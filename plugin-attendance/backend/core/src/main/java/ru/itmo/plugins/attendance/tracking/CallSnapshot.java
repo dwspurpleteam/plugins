@@ -11,6 +11,7 @@ import java.util.List;
  * @param serverTime    время сервера, по нему клиент считает длительность без учёта своих часов
  * @param present       кто сейчас в звонке, по времени входа
  * @param left          кто покинул звонок, сначала последние
+ * @param summary       публикации сводки через Result Gateway
  */
 public record CallSnapshot(
         String callId,
@@ -22,7 +23,8 @@ public record CallSnapshot(
         List<Gap> gaps,
         Instant serverTime,
         List<Participant> present,
-        List<Participant> left) {
+        List<Participant> left,
+        SummaryBoard.View summary) {
 
     /**
      * @param joinedAt {@code null}: участник вошёл до начала отслеживания

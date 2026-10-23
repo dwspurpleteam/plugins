@@ -5,6 +5,8 @@ protobuf-plugin = "0.10.0"
 node-plugin = "7.1.0"
 # Node.js, который Gradle скачивает для сборки фронтенда.
 nodejs = "24.22.1"
+# Mock Result Gateway и тесты HTTP-клиента; standalone — сборка без внешних зависимостей, её Jetty не конфликтует с BOM.
+wiremock = "3.13.2"
 
 # Версии gRPC и protobuf задаёт BOM Spring Boot.
 [libraries]
@@ -17,6 +19,7 @@ grpc-protobuf = { module = "io.grpc:grpc-protobuf" }
 grpc-stub = { module = "io.grpc:grpc-stub" }
 grpc-inprocess = { module = "io.grpc:grpc-inprocess" }
 protobuf-java = { module = "com.google.protobuf:protobuf-java" }
+wiremock-standalone = { module = "org.wiremock:wiremock-standalone", version.ref = "wiremock" }
 
 [plugins]
 spring-boot = { id = "org.springframework.boot", version.ref = "spring-boot" }

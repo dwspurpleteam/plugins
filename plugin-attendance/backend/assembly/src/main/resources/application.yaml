@@ -1,6 +1,10 @@
 spring:
   application:
     name: plugin-attendance
+  config:
+    # Профили лежат в backend/assembly/config. Сам Spring Boot ищет их в config/ рабочей папки, то есть при запуске
+    # из backend/assembly; импорт находит их и при запуске из backend, например из IDE с настройками по умолчанию.
+    import: optional:file:./assembly/config/
 
 server:
   port: 8081
@@ -34,6 +38,14 @@ attendance:
     keepalive-timeout: 20s
     reconnect-min-delay: 1s
     reconnect-max-delay: 30s
+
+  result-gateway:
+    # Куда публикуется сводка. Для разработки — mock на WireMock: gradlew resultGatewayMock.
+    url: http://localhost:8089
+    # Куда Result Gateway сообщает о доставке; по умолчанию /platform/deliveries этого процесса на localhost.
+    # callback-url: http://host.docker.internal:8081/platform/deliveries
+    connect-timeout: 2s
+    read-timeout: 5s
 
   fake:
     connect-delay: 300ms
