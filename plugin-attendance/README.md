@@ -2,28 +2,43 @@
 
 Плагин посещаемости для звонков. Версия 0.1 показывает, кто сейчас в звонке и кто из него вышел, по событиям [streamapi](https://github.com/dwspurpleteam/streamapi), и публикует сводку посещаемости через Result Gateway платформы.
 
-```
-plugin-attendance/
-  frontend/   страница плагина в iframe: React, Vite, TypeScript
-  backend/    сервер плагина: Java 25, Spring Boot 4.1; собирает frontend и отдаёт его вместе с API
-  wiremock/   mock Result Gateway для разработки: маппинги WireMock
+## Как это устроено
+
+```mermaid
+flowchart TB
+    subgraph browser["Браузер участника"]
+        meet["OpenVidu Meet"]
+        ui["Страница плагина<br/>в iframe"]
+    end
+
+    subgraph stand["Стенд calls.vareonix.cc"]
+        livekit["LiveKit"]
+        streamapi["streamapi<br/>события через NATS JetStream"]
+    end
+
+    subgraph plugin["backend плагина, порт 8081"]
+        api["REST API и статика"]
+        tracker["CallRegistry, CallTracker:<br/>состав звонков в памяти"]
+        publisher["SummaryPublisher"]
+    end
+
+    rg["Result Gateway<br/>пока mock: WireMock, порт 8089"]
+
+    meet <-->|WebRTC| livekit
+    meet -->|"iframe: ?callId, roomId, participantId"| ui
+    ui -->|"страница, GET participants раз в 2 с,<br/>POST summary"| api
+    livekit -->|вебхуки| streamapi
+    streamapi -->|"gRPC EventService.Subscribe:<br/>вход, выход, конец звонка"| tracker
+    api --> tracker
+    api --> publisher
+    publisher -->|"POST /v1/results"| rg
+    rg -.->|"POST /platform/deliveries<br/>через 1–3 с"| api
 ```
 
-```
-iframe в Meet ── GET api/calls/{callId}/participants, раз в 2 с ──► backend (Spring Boot)
-                                                                      │ gRPC EventService.Subscribe
-                                                                      ▼
-                                              вебхуки LiveKit ──► streamapi ──► NATS JetStream
-
-iframe в Meet ── POST api/calls/{callId}/summary ──► backend ── POST /v1/results ──────────────► Result Gateway
-                                                        ▲                                        (mock: WireMock)
-                                                        └── POST /platform/deliveries, через 1–3 с ─────┘
-```
-
-- **frontend** — самостоятельный npm-проект. Его сборку `frontend/dist` Gradle кладёт в jar backend, поэтому страницу и API отдаёт один процесс.
-- **backend** — самостоятельный Gradle-проект со своим wrapper и двумя модулями: `core` — код плагина, `assembly` — main class, настройки и исполняемый jar. Первый запрос по `callId` подписывает плагин на `participant.joined`, `participant.left` и `call.ended`, состав звонка хранится в памяти. Если 10 минут никто не открывает плагин в звонке, отслеживание останавливается.
-- **Источник событий** — `streamapi` (по умолчанию) или `fake`, генератор для разработки без сети.
-- **Сводка** — кнопка «Опубликовать сводку» отправляет число участников в звонке и вышедших в Result Gateway. Настоящего Result Gateway ещё нет, его заменяет WireMock: он принимает сводку и через 1–3 с сообщает плагину о доставке. Подробнее — в разделе [Сводка через Result Gateway](#сводка-через-result-gateway).
+- **frontend** — самостоятельный npm-проект: React, Vite, TypeScript. Его сборку Gradle кладёт в jar backend, поэтому страницу и API отдаёт один процесс.
+- **backend** — самостоятельный Gradle-проект на Java 25 и Spring Boot 4.1 со своим wrapper и двумя модулями: `core` — код плагина, `assembly` — main class, настройки и исполняемый jar. Первый запрос по `callId` подписывает плагин на `participant.joined`, `participant.left` и `call.ended`, состав звонка хранится в памяти. Если 10 минут от страницы плагина нет запросов, то есть в звонке её никто не держит открытой, отслеживание останавливается.
+- **Источник событий** — streamapi (по умолчанию) или `fake`: генератор внутри backend для разработки без стенда. С ним вместо Meet плагин открывают на странице `dev-host.html`, а участников добавляют кнопками.
+- **Сводка** — кнопка «Опубликовать сводку» отправляет в Result Gateway число участников в звонке и вышедших. Настоящего Result Gateway ещё нет, его заменяет WireMock с маппингами из `wiremock/`: он принимает сводку и через 1–3 с сообщает плагину о доставке. Подробнее — в разделе [Сводка через Result Gateway](#сводка-через-result-gateway).
 
 ## Требования
 
@@ -53,7 +68,7 @@ cd plugins/plugin-attendance/backend
 
 Потом откройте одну из страниц:
 
-- <http://localhost:8081/dev-host.html> — плагин в iframe с `sandbox="allow-scripts"`, как в OpenVidu Meet, и кнопки «Вошёл», «Вышел», «Завершить звонок» и «Обрыв связи».
+- <http://localhost:8081/dev-host.html> — плагин в iframe с `sandbox="allow-scripts"`, как в OpenVidu Meet, и кнопки «Вошёл», «Вышел», «Завершить звонок» и «Обрыв связи на 5 с».
 - <http://localhost:8081/?callId=demo> — страница плагина напрямую.
 
 Без кнопок событие можно отправить запросом:
@@ -70,13 +85,28 @@ Invoke-RestMethod -Method Post http://localhost:8081/dev/calls/demo/events -Cont
 
 ## С настоящим звонком на стенде
 
+Звонок и подписка должны быть в одном окружении: без [профиля](#профили) `stage` backend подписывается на streamapi prod и звонков stage не видит.
+
+### Через dev-host.html
+
+Подходит для prod и stage, деплой не нужен.
+
 1. Запустите backend без параметров: `.\gradlew.bat bootRun` (Windows) или `./gradlew bootRun`. Он подпишется на streamapi prod по адресу `calls.vareonix.cc:443`.
 2. Зайдите в звонок на <https://calls.vareonix.cc/meet/> и узнайте `callId` — это SID комнаты LiveKit вида `RM_…`, а не имя комнаты.
    - Откройте DevTools (F12) → Network, отфильтруйте WS и выберите соединение `rtc?…` → вкладка Messages.
    - Одно из первых входящих бинарных сообщений (JoinResponse) содержит SID. Переключите просмотр сообщения на UTF-8 и найдите `RM_`.
    - Либо скопируйте сообщение как Base64 и выполните в консоли `atob('<base64>').match(/RM_\w+/)[0]`.
 3. Откройте <http://localhost:8081/dev-host.html?callId=RM_…>.
-4. Заходите в звонок и выходите из него со второй вкладки или с телефона: список меняется через одну–три секунды. Звонок и подписка должны быть в одном окружении: звонок на stage виден только с [профилем](#профили) `stage`.
+4. Заходите в звонок и выходите из него со второй вкладки или с телефона: список меняется через одну–три секунды.
+
+### В окне Meet на stage
+
+Meet на stage собран из форка с плагинами, и плагин посещаемости в нём уже подключён (см. [Встраивание в Meet](#встраивание-в-meet)).
+
+1. Запустите backend с профилем `stage`.
+2. Сделайте его доступным по https по адресу плагина из `MEET_PLUGINS`, например туннелем на `localhost:8081`. Чтобы Meet открывал ваш backend, замените адрес в deployer на свой.
+3. Включите в браузере окружение stage, как описано в README [deployer](https://github.com/dwspurpleteam/deployer), и зайдите в звонок.
+4. Нажмите «Посещаемость» на панели Plugins: плагин откроется в окне звонка, `callId` Meet подставит сам.
 
 Другие окружения:
 
@@ -89,10 +119,27 @@ Invoke-RestMethod -Method Post http://localhost:8081/dev/calls/demo/events -Cont
 
 По [спецификации платформы](https://github.com/dwspurpleteam/specs) backend плагина не пишет в звонок сам: результаты и команды он отправляет в Result Gateway. Тот проверяет сообщение, адресатов и лимиты и доставляет результат участникам. Плагин посещаемости публикует так сводку.
 
-1. Кнопка «Опубликовать сводку» вызывает `POST api/calls/{callId}/summary`.
-2. Backend собирает сводку по текущему составу звонка и отправляет её в `POST <attendance.result-gateway.url>/v1/results`. Адресаты — все, кто сейчас в звонке, ревизия растёт с каждой публикацией. Запрос UI ждёт ответа Result Gateway о приёме.
-3. Позже Result Gateway сообщает о доставке запросом `POST /platform/deliveries`. Более старая ревизия, чем уже доставленная, отбрасывается: доставки могут прийти в любом порядке.
-4. Последняя доставленная сводка и статус последней публикации приходят в ответе `participants`. Сводку видят все, у кого открыт плагин в этом звонке.
+```mermaid
+sequenceDiagram
+    participant UI as Страница плагина
+    participant B as backend
+    participant RG as Result Gateway (mock)
+
+    UI->>B: POST api/calls/{callId}/summary
+    B->>RG: POST /v1/results, заголовок X-Callback-Url
+    RG-->>B: 202
+    B-->>UI: публикация ACCEPTED
+    Note over RG: через 1–3 с
+    RG->>B: POST /platform/deliveries, статус DELIVERED и исходное сообщение
+    B-->>RG: 204
+    UI->>B: GET api/calls/{callId}/participants, раз в 2 с
+    B-->>UI: публикация DELIVERED и доставленная сводка
+```
+
+- Сводку backend собирает по текущему составу звонка. Адресаты — все, кто сейчас в звонке, ревизия растёт с каждой публикацией.
+- Запрос UI ждёт только ответа Result Gateway о приёме, о доставке тот сообщает позже, по адресу из `X-Callback-Url`.
+- Доставки могут прийти в любом порядке: более старая ревизия, чем уже доставленная, отбрасывается.
+- Последняя доставленная сводка и статус последней публикации приходят в ответе `participants`. Сводку видят все, у кого открыт плагин в этом звонке.
 
 Сообщение в Result Gateway — формат `call.result` из спецификации:
 
@@ -114,7 +161,7 @@ Invoke-RestMethod -Method Post http://localhost:8081/dev/calls/demo/events -Cont
 }
 ```
 
-Адрес для отчёта о доставке backend передаёт заголовком `X-Callback-Url`. Отчёт — исходное сообщение целиком и статус: `{"status": "DELIVERED", "reason": null, "message": {…}}`, при отказе `REJECTED` и причина.
+Отчёт о доставке — исходное сообщение целиком и статус: `{"status": "DELIVERED", "reason": null, "message": {…}}`, при отказе `REJECTED` и причина.
 
 Статусы публикации:
 
@@ -176,6 +223,8 @@ cd plugins/plugin-attendance/frontend; npm run dev                # или св�
 | `attendance.result-gateway.callback-url` | `/platform/deliveries` этого процесса на localhost | Куда Result Gateway отправляет отчёт о доставке |
 | `attendance.result-gateway.connect-timeout` | `2s` | Сколько ждать соединения с Result Gateway |
 | `attendance.result-gateway.read-timeout` | `5s` | Сколько ждать ответа о приёме сообщения |
+
+Остальные настройки, например паузы переподключения к streamapi и параметры генератора `fake`, описаны комментариями в `application.yaml`.
 
 ### Профили
 
@@ -246,16 +295,22 @@ cd plugins/plugin-attendance/frontend; npm run dev                # или св�
 
 ## Встраивание в Meet
 
-Пока нет подписанного контекста запуска, Meet открывает плагин так:
+Окна плагинов есть в форке [openvidu-meet](https://github.com/dwspurpleteam/openvidu-meet), ветка `feat/iframe-to-plugin`. Список плагинов Meet берёт из переменной окружения `MEET_PLUGINS`:
+
+```json
+[{"id": "attendance", "title": "Посещаемость", "url": "https://<адрес плагина>/"}]
+```
+
+На панели Plugins в звонке у каждого плагина своя кнопка: она открывает и закрывает окно с iframe. Пока нет подписанного контекста запуска, Meet передаёт контекст в адресе:
 
 ```
-<адрес плагина>/?callId=<room.sid>&roomId=<room.name>&participantId=<identity>
+<url>?callId=<room.sid>&roomId=<room.name>&participantId=<identity>
 ```
 
-Во фронтенде Meet эти значения дают `await lkRoom.getSid()`, `lkRoom.name` и `lkRoom.localParticipant.identity`.
-
-- Страница рассчитана на iframe с `sandbox="allow-scripts"`, как у `plugin-iframe-window` в ветке `feat/floating` форка Meet. У такой страницы opaque origin, поэтому плагин не использует cookies и `localStorage`, а backend отдаёт и API, и статику с `Access-Control-Allow-Origin: *`.
+- Окно — iframe с `sandbox="allow-scripts"`. У такой страницы opaque origin, поэтому плагин не использует cookies и `localStorage`, а backend отдаёт и API, и статику с `Access-Control-Allow-Origin: *`.
 - Адрес страницы должен заканчиваться на `/`: пути к ассетам и API относительные, так что плагин работает и под префиксом вроде `/plugins/attendance/`.
+- Meet открыт по https, поэтому адрес плагина тоже должен быть https и открываться из браузеров участников: iframe по http браузер заблокирует.
+- На stage `MEET_PLUGINS` задан в [deployer](https://github.com/dwspurpleteam/deployer): ветка `dev`, файл `apps/calls/meet/vars/base.yaml`. На prod работает исходный Meet, плагинов в нём нет.
 
 ## Ограничения версии 0.1
 
@@ -284,11 +339,13 @@ cd plugins/plugin-attendance/frontend; npm run dev                # или св�
 
 Отдельной команды для фронтенда нет: проверка типов TypeScript входит в его сборку (`npm run build`).
 
+CI запускает `./gradlew build`, то есть тесты и сборку jar, на каждый пуш, подробнее — в [README репозитория](../README.md#ci).
+
 ## Структура
 
 ```
 frontend/
-  src/                    React-приложение: опрос API, список участников
+  src/                    React-приложение: опрос API, список участников, публикация сводки
   public/                 статика, которая копируется в сборку как есть
   package.json, vite.config.ts, tsconfig.json
 backend/
