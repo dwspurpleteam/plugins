@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Плагин в окне Meet</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #eef0f3;
+      --panel: #ffffff;
+      --text: #1b1f27;
+      --muted: #667085;
+      --line: #d9dde3;
+      --accent: #2563eb;
+      font: 14px/1.4 system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg: #0e1013; --panel: #1a1d23; --text: #e6e9ef; --muted: #9aa3b2; --line: #2d333d; --accent: #7aa7ff; }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 16px; background: var(--bg); color: var(--text); }
+    h1 { margin: 0 0 4px; font-size: 18px; }
+    p { margin: 0 0 12px; color: var(--muted); }
+    code { font-family: ui-monospace, Consolas, monospace; font-size: .92em; }
+    .layout { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start; }
+    /* Ширина задана явно: длинный текст в панелях не переносит колонку под окно плагина. */
+    .side { flex: 0 1 420px; min-width: 0; }
+    .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px; width: min(420px, 100%); }
+    .panel h2 { margin: 0 0 8px; font-size: 14px; }
+    label { display: block; margin-bottom: 8px; font-size: 12px; color: var(--muted); }
+    input { display: block; width: 100%; margin-top: 2px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: var(--text); font: inherit; }
+    .row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+    button { padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text); font: inherit; cursor: pointer; }
+    button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    #log { min-height: 1.4em; margin: 8px 0 0; font-size: 12px; }
+    .window { display: flex; flex-direction: column; width: 360px; height: 460px; min-width: 240px; min-height: 160px;
+      overflow: hidden; resize: both; border: 1px solid var(--line); border-radius: 12px; background: var(--panel);
+      box-shadow: 0 8px 24px rgb(0 0 0 / .15); }
+    .titlebar { padding: 6px 10px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+    iframe { flex: 1; width: 100%; border: 0; background: white; }
+  </style>
+</head>
+<body>
+  <h1>Плагин в окне Meet</h1>
+  <p>Плагин открыт в iframe с <code>sandbox="allow-scripts"</code>, как в OpenVidu Meet: у страницы плагина нет своего origin.
+    Окно можно растягивать за правый нижний угол.</p>
+
+  <div class="layout">
+    <div class="window">
+      <div class="titlebar">Посещаемость</div>
+      <iframe id="plugin" title="Посещаемость" sandbox="allow-scripts"
+              allow="camera 'none'; microphone 'none'; display-capture 'none'; geolocation 'none'"
+              referrerpolicy="no-referrer"></iframe>
+    </div>
+
+    <div class="side">
+      <form class="panel" id="context">
+        <h2>Контекст запуска</h2>
+        <label>callId — SID комнаты LiveKit (RM_…), в демо-режиме любой
+          <input name="callId" required value="demo"></label>
+        <label>roomId — имя комнаты
+          <input name="roomId" value="demo-room"></label>
+        <label>participantId — identity того, кто открыл плагин
+          <input name="participantId" value=""></label>
+        <div class="row">
+          <button class="primary" type="submit">Открыть плагин</button>
+          <button type="button" data-size="300x220">300×220</button>
+          <button type="button" data-size="360x460">360×460</button>
+          <button type="button" data-size="640x520">640×520</button>
+        </div>
+        <p id="source" style="margin: 8px 0 0"></p>
+      </form>
+
+      <div class="panel" id="simulator" hidden style="margin-top: 16px">
+        <h2>Имитация событий</h2>
+        <label>participantId; пусто — новый случайный участник или случайный присутствующий
+          <input name="participantId" id="simParticipant" placeholder="anna-k3j9xq2mp7alw0e"></label>
+        <div class="row">
+          <button type="button" data-event="participant.joined">Вошёл</button>
+          <button type="button" data-event="participant.left">Вышел</button>
+          <button type="button" data-event="call.ended">Завершить звонок</button>
+          <button type="button" id="drop">Обрыв связи на 5 с</button>
+        </div>
+        <p id="log"></p>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const form = document.getElementById('context');
+    const frame = document.getElementById('plugin');
+    const windowBox = document.querySelector('.window');
+    const log = document.getElementById('log');
+    const fields = ['callId', 'roomId', 'participantId'];
+
+    const initial = new URLSearchParams(location.search);
+    for (const name of fields) {
+      if (initial.has(name)) form.elements[name].value = initial.get(name);
+    }
+
+    function openPlugin() {
+      const params = new URLSearchParams();
+      for (const name of fields) {
+        const value = form.elements[name].value.trim();
+        if (value) params.set(name, value);
+      }
+      frame.src = './?' + params;
+      history.replaceState(null, '', '?' + params);
+    }
+
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      openPlugin();
+    });
+
+    for (const button of document.querySelectorAll('[data-size]')) {
+      button.addEventListener('click', () => {
+        const [width, height] = button.dataset.size.split('x');
+        windowBox.style.width = width + 'px';
+        windowBox.style.height = height + 'px';
+      });
+    }
+
+    async function post(path, body) {
+      const callId = form.elements.callId.value.trim();
+      const response = await fetch(`dev/calls/${encodeURIComponent(callId)}/${path}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      if (response.ok) {
+        log.textContent = 'Отправлено: ' + (body ? body.type : path);
+      } else {
+        const problem = await response.json().catch(() => ({}));
+        log.textContent = problem.detail || `Ошибка ${response.status}`;
+      }
+    }
+
+    for (const button of document.querySelectorAll('[data-event]')) {
+      button.addEventListener('click', () => post('events', {
+        type: button.dataset.event,
+        participantId: document.getElementById('simParticipant').value.trim() || null,
+      }));
+    }
+    document.getElementById('drop').addEventListener('click', () => post('connection-loss?seconds=5'));
+
+    fetch('api/info')
+      .then((response) => response.json())
+      .then((info) => {
+        document.getElementById('source').textContent =
+          `Источник событий: ${info.source} — ${info.target}. Result Gateway: ${info.resultGateway}. Версия ${info.version}.`;
+        document.getElementById('simulator').hidden = info.source !== 'fake';
+      })
+      .catch(() => {
+        document.getElementById('source').textContent = 'Сервер плагина не отвечает';
+      });
+
+    openPlugin();
+  </script>
+</body>
+</html>

@@ -1,0 +1,55 @@
+name: Gradle plugin
+
+on:
+  workflow_call:
+    inputs:
+      project-dir:
+        description: Папка Gradle-сборки плагина (где лежит gradlew), например plugin-attendance/backend.
+        required: true
+        type: string
+      java-version:
+        description: JDK, на котором запускается Gradle. Должен совпадать с toolchain сборки, иначе Gradle скачает ещё один.
+        required: false
+        type: string
+        default: "25"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Новый пуш в ту же ветку отменяет устаревшую сборку.
+    concurrency:
+      group: ${{ github.workflow }}-${{ inputs.project-dir }}-${{ github.ref }}
+      cancel-in-progress: true
+    defaults:
+      run:
+        working-directory: ${{ inputs.project-dir }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java-version }}
+
+      # Кэш зависимостей Gradle и проверка gradle-wrapper.jar.
+      - uses: gradle/actions/setup-gradle@v6
+
+      # build = тесты всех модулей + сборка jar (вместе с фронтендом, если сборка его подключает).
+      - name: Build and test
+        run: ./gradlew build
+
+      - name: Upload test reports
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-reports
+          path: |
+            ${{ inputs.project-dir }}/**/build/reports/tests/
+            ${{ inputs.project-dir }}/**/build/test-results/
+          if-no-files-found: ignore
+          retention-days: 7

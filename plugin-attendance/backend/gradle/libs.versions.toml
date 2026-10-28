@@ -1,0 +1,28 @@
+[versions]
+spring-boot = "4.1.1"
+spring-dependency-management = "1.1.7"
+protobuf-plugin = "0.10.0"
+node-plugin = "7.1.0"
+# Node.js, который Gradle скачивает для сборки фронтенда.
+nodejs = "24.22.1"
+# Mock Result Gateway и тесты HTTP-клиента; standalone — сборка без внешних зависимостей, её Jetty не конфликтует с BOM.
+wiremock = "3.13.2"
+
+# Версии gRPC и protobuf задаёт BOM Spring Boot.
+[libraries]
+spring-boot-starter-webmvc = { module = "org.springframework.boot:spring-boot-starter-webmvc" }
+spring-boot-starter-actuator = { module = "org.springframework.boot:spring-boot-starter-actuator" }
+spring-boot-starter-test = { module = "org.springframework.boot:spring-boot-starter-test" }
+junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher" }
+grpc-netty-shaded = { module = "io.grpc:grpc-netty-shaded" }
+grpc-protobuf = { module = "io.grpc:grpc-protobuf" }
+grpc-stub = { module = "io.grpc:grpc-stub" }
+grpc-inprocess = { module = "io.grpc:grpc-inprocess" }
+protobuf-java = { module = "com.google.protobuf:protobuf-java" }
+wiremock-standalone = { module = "org.wiremock:wiremock-standalone", version.ref = "wiremock" }
+
+[plugins]
+spring-boot = { id = "org.springframework.boot", version.ref = "spring-boot" }
+spring-dependency-management = { id = "io.spring.dependency-management", version.ref = "spring-dependency-management" }
+protobuf = { id = "com.google.protobuf", version.ref = "protobuf-plugin" }
+node = { id = "com.github.node-gradle.node", version.ref = "node-plugin" }
