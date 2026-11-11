@@ -2,4 +2,4 @@ attendance:
   streamapi:
     metadata:
       # Подписка на streamapi окружения stage
-      cookie: "composer_stage=<secret>:stage"
+      cookie: "gitsail_stage=<secret>:stage"

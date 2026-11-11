@@ -49,7 +49,7 @@ class StreamApiEventSourceTest {
     private final BlockingQueue<Metadata> requestHeaders = new LinkedBlockingQueue<>();
     private final RecordingListener listener = new RecordingListener();
     private final StreamApiProperties properties = new StreamApiProperties(
-            "in-process", true, Map.of("cookie", "composer_stage=secret:stage"),
+            "in-process", true, Map.of("cookie", "gitsail_stage=secret:stage"),
             Duration.ofMinutes(6), Duration.ofSeconds(20), Duration.ofMillis(20), Duration.ofMillis(100));
 
     private Server server;
@@ -82,7 +82,7 @@ class StreamApiEventSourceTest {
         Metadata headers = requestHeaders.poll(5, TimeUnit.SECONDS);
         assertThat(headers).isNotNull();
         assertThat(headers.get(StreamApiEventSource.CALL_ID_HEADER)).isEqualTo("RM_1");
-        assertThat(headers.get(COOKIE)).isEqualTo("composer_stage=secret:stage");
+        assertThat(headers.get(COOKIE)).isEqualTo("gitsail_stage=secret:stage");
         assertThat(listener.next()).isEqualTo("connected");
 
         ServerCallStreamObserver<SubscribeEventsResponse> stream = service.nextStream();
@@ -148,7 +148,7 @@ class StreamApiEventSourceTest {
     @Test
     void rejectsUnreplacedSecretPlaceholder() {
         assertThatThrownBy(() -> new StreamApiProperties(
-                "calls.example:443", false, Map.of("cookie", "composer_stage=<secret>:stage"),
+                "calls.example:443", false, Map.of("cookie", "gitsail_stage=<secret>:stage"),
                 Duration.ofMinutes(6), Duration.ofSeconds(20), Duration.ofSeconds(1), Duration.ofSeconds(30)))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("attendance.streamapi.metadata.cookie still contains <secret>");
