@@ -3,10 +3,15 @@ name: plugin-attendance
 on:
   push:
     branches: ["**"]
+    paths:
+      - plugin-attendance/**
+      - .github/workflows/plugin-attendance.yml
+      - .github/workflows/gradle-plugin.yml
   workflow_dispatch:
 
 permissions:
   contents: read
+  packages: write
 
 jobs:
   build:
@@ -14,3 +19,16 @@ jobs:
     uses: ./.github/workflows/gradle-plugin.yml
     with:
       project-dir: plugin-attendance/backend
+      artifact: attendance
+      artifact-path: plugin-attendance/backend/assembly/build/libs/plugin-attendance.jar
+
+  image:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    uses: dwspurpleteam/.github/.github/workflows/image.yml@main
+    with:
+      service: attendance
+      directory: plugin-attendance
+      artifact: attendance
+      artifact-path: plugin-attendance/backend/assembly/build/libs
+    secrets: inherit
