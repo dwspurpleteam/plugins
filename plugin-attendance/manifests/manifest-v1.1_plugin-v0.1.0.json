@@ -1,0 +1,30 @@
+{
+  "manifest-version": "1.1",
+  "plugin-id": "attendance",
+  "plugin-version": "0.1.0",
+  "name": "Плагин посещаемости",
+  "description": "Учёт присутствия участников с момента подключения плагина к звонку",
+  "frontend": {
+    "url-web": "https://calls.vareonix.cc/apps/plugin-attendance/"
+  },
+  "backend": {
+    "health-url": "https://calls.vareonix.cc/apps/plugin-attendance/actuator/health",
+    "control-url": "https://calls.vareonix.cc/apps/plugin-attendance/platform/control",
+    "initial-state": ["participants"],
+    "events": {
+      "available-event-types": [
+        "participant.joined",
+        "participant.left",
+        "call.ended"
+      ]
+    },
+    "media": {
+      "input": [],
+      "output": []
+    },
+    "results": {
+      "keys": ["attendance.summary"],
+      "delivery-report-url": "https://calls.vareonix.cc/apps/plugin-attendance/platform/deliveries"
+    }
+  }
+}
