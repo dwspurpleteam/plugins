@@ -1,0 +1,6 @@
+**
+!backend/
+!backend/assembly/
+!backend/assembly/build/
+!backend/assembly/build/libs/
+!backend/assembly/build/libs/plugin-attendance.jar
