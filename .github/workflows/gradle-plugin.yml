@@ -24,6 +24,7 @@ on:
 
 permissions:
   contents: read
+  packages: read
 
 jobs:
   build:
@@ -50,6 +51,8 @@ jobs:
 
       # build = тесты всех модулей + сборка jar (вместе с фронтендом, если сборка его подключает).
       - name: Build and test
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: ./gradlew build
 
       - name: artifact

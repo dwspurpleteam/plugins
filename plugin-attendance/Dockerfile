@@ -6,7 +6,7 @@ LABEL org.opencontainers.image.source="https://github.com/dwspurpleteam/plugins"
 
 WORKDIR /app
 
-COPY backend/assembly/build/libs/plugin-attendance.jar application.jar
+COPY backend/build/libs/plugin-attendance.jar application.jar
 
 USER 1000:1000
 

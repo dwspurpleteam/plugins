@@ -1,0 +1,42 @@
+meta {
+  name: Activate and wait for StreamAPI
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{baseUrl}}/control
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "schemaVersion": "1.0",
+    "activationId": "{{activationId}}",
+    "pluginId": "attendance",
+    "pluginVersion": "{{pluginVersion}}",
+    "registryId": "{{registryId}}",
+    "callId": "{{callId}}",
+    "activationSecret": "{{activationSecret}}",
+    "initialContext": null
+  }
+}
+
+script:pre-request {
+  const callId = bru.getEnvVar("callId");
+  if (!callId || callId === "REPLACE_WITH_REAL_CALL_ID") {
+    throw new Error("Set callId to the real call SID in the selected environment.");
+  }
+  if (!bru.getEnvVar("activationId") || bru.getEnvVar("activationId").startsWith("REPLACE")) {
+    throw new Error("Set activationId issued by Plugin Manager.");
+  }
+  if (!bru.getEnvVar("activationSecret") || bru.getEnvVar("activationSecret").startsWith("REPLACE")) {
+    throw new Error("Set activationSecret delivered by Plugin Manager. The ID alone is insufficient.");
+  }
+}

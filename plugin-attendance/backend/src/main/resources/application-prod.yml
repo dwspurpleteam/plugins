@@ -1,0 +1,4 @@
+attendance:
+  streamapi:
+    target: nginx:19090
+    plaintext: true

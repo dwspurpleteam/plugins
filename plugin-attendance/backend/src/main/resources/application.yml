@@ -1,0 +1,29 @@
+spring:
+  application:
+    name: plugin-attendance
+
+server:
+  address: 0.0.0.0
+  port: 8081
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, info
+
+attendance:
+  # Рабочий источник событий. Фейковый источник существует только в тестах.
+  source: streamapi
+
+  tracking:
+    max-calls: 100
+    failed-retention: 1m
+    cleanup-interval: 30s
+    ignored-participant-prefixes:
+      - streamapi-  # скрытый получатель медиа streamapi (prod и stage)
+      - EG_         # egress LiveKit (запись звонка)
+
+  activation:
+    # Must be shorter than Plugin Manager's HTTP request timeout (currently 5s).
+    start-timeout: 4s
