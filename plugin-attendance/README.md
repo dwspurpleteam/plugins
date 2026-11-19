@@ -86,7 +86,9 @@ ID и секрет активации передаются только в contr
 
 ## Манифест и развёртывание
 
-Манифест выпуска: [manifest-v1.1_plugin-v1.0.1.json](manifests/manifest-v1.1_plugin-v1.0.1.json). Он объявляет health-url, control-url с путём `/control`, события плагина. Зарегистрируйте его как новую версию `1.0.1`; опубликованную в Registry версию с адресом локального туннеля менять не нужно.
+Манифест выпуска: [plugin-attendance-1.0.1-manifest-1.1.json](manifests/plugin-attendance-1.0.1-manifest-1.1.json). Он объявляет health-url, control-url с путём `/control`, события плагина. Зарегистрируйте его как новую версию `1.0.1`; опубликованную в Registry версию с адресом локального туннеля менять не нужно.
+
+Имена файлов: `plugin-{pluginId}-{pluginVersion}-manifest-{manifestVersion}.json`. Содержимое ранее выпущенных манифестов неизменяемо; для новой версии плагина создаётся отдельный файл.
 
 CI на каждой ветке собирает и тестирует JAR. После push в `main` workflow `plugin-attendance` также публикует образ `ghcr.io/dwspurpleteam/attendance:<commit SHA>` и отправляет событие в deployer. Его workflow `images` открывает PR с новым тегом образа; слияние этого PR запускает обновление сервера через GitSail. Для отправки события общему workflow нужен секрет `DEPLOYER_TOKEN` с доступом к репозиторию deployer.
 
