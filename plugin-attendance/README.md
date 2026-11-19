@@ -141,7 +141,7 @@ https://calls.vareonix.cc/apps/plugin-attendance/?callId=RM_REAL_CALL_ID
 
 Профиль `local` подключается к серверному StreamAPI по TLS. Для доставки команды от серверного Plugin Manager локальный backend должен быть доступен ему по HTTPS с маршрутами `/actuator/health` и `/control`. Для такого запуска создайте отдельную тестовую версию манифеста с адресом локального экземпляра.
 
-[Инструкция локальной проверки](docs/manual-sdk-tracking.md). [Коллекция Bruno](bruno/bruno.json) содержит прямой вызов `/control` и чтение состояния: откройте папку `bruno` как коллекцию, выберите окружение и заполните параметры. Для прямого вызова нужны ID и секрет существующей активации из Plugin Manager.
+[Инструкция локальной проверки](docs/manual-sdk-tracking.md). Пример прямого вызова `/control` приведён в [контракте активации](docs/activation.md); для него нужны ID и секрет существующей активации из Plugin Manager.
 
 После активации локальная страница доступна по адресу `http://127.0.0.1:18081/?callId=RM_REAL_CALL_ID`. Необязательные параметры `roomId` и `participantId` задают имя комнаты внизу страницы и выделение текущего участника. Подписанный контекст запуска пока не реализован.
 
@@ -221,7 +221,6 @@ backend/
   src/test/                     Тесты и gRPC fixtures
 frontend/                       React/TypeScript-интерфейс
 manifests/                      Манифесты версий плагина
-bruno/                          Запросы для проверки
 ```
 
 Java SDK используется в `service.streamapi`; трекеры работают через интерфейс `EventSource`. Точка входа приложения — `PluginAttendanceApplication`.

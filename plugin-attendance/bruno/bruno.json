@@ -1,6 +1,0 @@
-{
-  "version": "1",
-  "name": "Attendance SDK tracking",
-  "type": "collection",
-  "ignore": ["node_modules", ".git"]
-}
