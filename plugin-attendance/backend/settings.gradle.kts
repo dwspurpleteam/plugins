@@ -4,6 +4,3 @@ plugins {
 }
 
 rootProject.name = "plugin-attendance"
-
-// core — код плагина; assembly — main class, настройки и исполняемый jar.
-include("core", "assembly")

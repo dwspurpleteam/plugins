@@ -1,395 +1,227 @@
 # plugin-attendance
 
-Плагин посещаемости для звонков. Версия 0.1 показывает, кто сейчас в звонке и кто из него вышел, по событиям [streamapi](https://github.com/dwspurpleteam/streamapi), и публикует сводку посещаемости через Result Gateway платформы.
+Плагин посещаемости для звонков OpenVidu/LiveKit. Показывает текущих и вышедших участников, время входа и выхода, длительность присутствия и состояние подключения к событиям звонка.
 
-## Целевой манифест
+Backend — один Gradle-модуль на Java 25 и Spring Boot. React/TypeScript-интерфейс собирается вместе с backend и раздаётся из одного исполняемого JAR. Текущая версия плагина — `1.0.1`, зависимость Java SDK — `pluginsdk:plugin-sdk:1.1.0`.
 
-[manifests/manifest-v1.1_plugin-v0.1.0.json](manifests/manifest-v1.1_plugin-v0.1.0.json) описывает плагин по целевому формату манифеста `1.1` из репозитория `specs` (`specs/plugin-service-architecture/plugin-manifest-v1.1.md`). Публичные адреса взяты из конфигурации публикации в `deployer`: `https://calls.vareonix.cc/apps/plugin-attendance/`. Версия `0.1.0` соответствует `backend/gradle.properties`. `plugin-id: attendance` — постоянный идентификатор для регистрации, совпадающий с идентификатором в описанной интеграции Meet.
+## Как работает активация
 
-Манифесты размещаются в `manifests/` с именами `manifest-v<manifest-version>_plugin-v<plugin-version>.json`. Версии в имени должны совпадать с JSON. Опубликованные файлы сохраняются; для новых версий добавляются новые файлы. Например, следующая версия плагина `0.2.0` при том же формате получит имя `manifest-v1.1_plugin-v0.2.0.json`. Правила хранения и полный контракт описаны в спецификации `1.1`.
+1. Клиент запрашивает активацию звонка через `POST /v1/activations` в Plugin Manager.
+2. Менеджер получает манифест из Plugin Registry, проверяет `health-url` и доставляет контекст с `activationId`, `activationSecret` и `callId` на `POST /control` плагина.
+3. Backend создаёт отдельный SDK-клиент для активации и подписывается на события `participant.joined`, `participant.left`, `call.ended` в StreamAPI. SDK передаёт данные активации для проверки прав.
+4. После SDK `onConnected()` плагин отвечает на `/control` кодом 200. По умолчанию ожидание ограничено четырьмя секундами.
+5. Страница плагина читает снимки участников через HTTP API. Открытие и закрытие страницы не управляет подпиской.
 
-Это подготовленный манифест для интеграции, а не подтверждение готовности демо к целевому контракту. Страница, healthcheck и обработчик `/platform/deliveries` уже есть в приложении; обработчик `/platform/control`, начальный состав и управление по активациям ещё предстоит реализовать. Наличие маршрутов на работающем стенде отдельно не проверялось. Перед публикацией следует проверить реализацию и указать версию выпускаемой сборки; уже опубликованную версию не изменяют.
+На один звонок допускается одна одновременно работающая активация attendance. Повтор одинакового control-запроса использует существующую подписку; изменение параметров того же `activationId` возвращает 409. После неудачного запуска тот же запрос может начать новую попытку.
 
-Плагин работает на звонок (`per-call`), как все плагины текущего контракта, поэтому отдельного поля `activation.scope` нет. Манифест запрашивает начальный состав участников, события `participant.joined`, `participant.left`, `call.ended` и публикацию результата `attendance.summary`. Медиа не требуются. Учёт начинается с успешной инициализации активации; присутствующие в начальном составе учитываются с этого момента, без восстановления предыдущей истории.
+[Подробный контракт `/control`, ответы и ошибки](docs/activation.md).
 
-Получение событий по gRPC — общее правило платформы, поэтому в манифесте нет `transport` и `event-url`. Последнее поле в прежнем формате обозначало HTTP-обработчик событий самого плагина. Адрес streamapi, TLS и параметры доступа нужны клиенту backend, но передаются платформой при запуске активации. В текущем демо они по-прежнему задаются настройками `attendance.streamapi.*`.
+## Сборка и локальный запуск
 
-Для применения манифеста в плагине необходимы следующие изменения:
+Нужны JDK 25 и доступ к GitHub Packages для скачивания SDK. Gradle Wrapper и версия Node.js для сборки интерфейса настроены в проекте; Gradle скачивает Node.js автоматически.
 
-1. Реализовать `POST /platform/control`: проверять управляющие сообщения, запускать и останавливать обработку по `activationId`, повторный запуск обрабатывать без второй подписки.
-2. Запускать `CallRegistry` по команде активации после получения начального состава и подключения к событиям. Убрать остановку активной обработки по отсутствию запросов UI; чтение состава не должно само создавать активацию.
-3. Получать согласованные начальный состав и поток событий через платформу. Не запрашивать историю до подключения; разрывы учёта отмечать как неполные данные.
-4. Получать проверенный контекст интерфейса через bridge и проверять его на backend. Пользователя, звонок и разрешения определять по этому контексту; параметры URL оставить только для явного демо-режима.
-5. Добавить `activationId` в сообщения и отчёты результатов, проверять отправителя callback `/platform/deliveries` и принадлежность сообщения активации. Публикация после отзыва разрешения или остановки не допускается.
-6. Адреса источника событий и Result Gateway и параметры доступа получать из конфигурации платформенной интеграции при запуске. `fake` и WireMock оставить средствами разработки.
+### Доступ к SDK
 
-NGINX удаляет внешний префикс `/apps/plugin-attendance/`: например, публичный `/apps/plugin-attendance/platform/deliveries` попадает в backend как `/platform/deliveries`. Backend не читает манифест автоматически: он реализует объявленные обработчики и использует данные конкретного запуска.
+Добавьте credentials в пользовательский `~/.gradle/gradle.properties` (Windows: `%USERPROFILE%\.gradle\gradle.properties`):
 
-## Как это устроено
-
-```mermaid
-flowchart TB
-    subgraph browser["Браузер участника"]
-        meet["OpenVidu Meet"]
-        ui["Страница плагина<br/>в iframe"]
-    end
-
-    subgraph stand["Стенд calls.vareonix.cc"]
-        livekit["LiveKit"]
-        streamapi["streamapi<br/>события через NATS JetStream"]
-    end
-
-    subgraph plugin["backend плагина, порт 8081"]
-        api["REST API и статика"]
-        tracker["CallRegistry, CallTracker:<br/>состав звонков в памяти"]
-        publisher["SummaryPublisher"]
-    end
-
-    rg["Result Gateway<br/>пока mock: WireMock, порт 8089"]
-
-    meet <-->|WebRTC| livekit
-    meet -->|"iframe: ?callId, roomId, participantId"| ui
-    ui -->|"страница, GET participants раз в 2 с,<br/>POST summary"| api
-    livekit -->|вебхуки| streamapi
-    streamapi -->|"gRPC EventService.Subscribe:<br/>вход, выход, конец звонка"| tracker
-    api --> tracker
-    api --> publisher
-    publisher -->|"POST /v1/results"| rg
-    rg -.->|"POST /platform/deliveries<br/>через 1–3 с"| api
+```properties
+gpr.user=YOUR_GITHUB_LOGIN
+gpr.key=YOUR_GITHUB_TOKEN
 ```
 
-- **frontend** — самостоятельный npm-проект: React, Vite, TypeScript. Его сборку Gradle кладёт в jar backend, поэтому страницу и API отдаёт один процесс.
-- **backend** — самостоятельный Gradle-проект на Java 25 и Spring Boot 4.1 со своим wrapper и двумя модулями: `core` — код плагина, `assembly` — main class, настройки и исполняемый jar. Первый запрос по `callId` подписывает плагин на `participant.joined`, `participant.left` и `call.ended`, состав звонка хранится в памяти. Если 10 минут от страницы плагина нет запросов, то есть в звонке её никто не держит открытой, отслеживание останавливается.
-- **Источник событий** — streamapi (по умолчанию) или `fake`: генератор внутри backend для разработки без стенда. С ним вместо Meet плагин открывают на странице `dev-host.html`, а участников добавляют кнопками.
-- **Сводка** — кнопка «Опубликовать сводку» отправляет в Result Gateway число участников в звонке и вышедших. Настоящего Result Gateway ещё нет, его заменяет WireMock с маппингами из `wiremock/`: он принимает сводку и через 1–3 с сообщает плагину о доставке. Подробнее — в разделе [Сводка через Result Gateway](#сводка-через-result-gateway).
+Используется GitHub personal access token (classic) с `read:packages` и доступом к пакету SDK. Credentials хранятся вне репозитория. Вместо Gradle properties можно передать `GITHUB_USERNAME` и `GITHUB_TOKEN`; также поддерживаются `GITHUB_ACTOR` и `GH_TOKEN`.
 
-## Требования
+Версия SDK закреплена в [каталоге зависимостей](backend/gradle/libs.versions.toml). Исходники SDK для сборки не требуются.
 
-- Java 25 (LTS). Плагин собирается, тестируется и запускается через `bootRun` на JDK 25, какой бы JDK ни запускал Gradle: для самого Gradle подойдёт любой JDK 17+ в `JAVA_HOME` или `PATH`. Установленный JDK 25 Gradle находит сам, а если не найдёт, скачает в `~/.gradle/jdks`. Готовый jar запускается на Java 25 и новее.
-- Node.js ставить не нужно: при первой сборке Gradle скачает Node 24 в `backend/.gradle/`.
-- Для работы со streamapi на стенде нужна сеть, в которой gRPC (HTTP/2) доходит до `calls.vareonix.cc:443`. Если прокси режет HTTP/2, используйте демо-режим.
+### Запуск приложения
 
-## Быстрый старт с демо-данными
+Из корня репозитория `plugins`:
 
-Все команды Gradle запускаются из `plugins/plugin-attendance/backend`:
-
-```shell
-cd plugins/plugin-attendance/backend
-
-# Windows (PowerShell)
-.\gradlew.bat bootRun --args='--attendance.source=fake'
-
-# Linux, macOS
-./gradlew bootRun --args='--attendance.source=fake'
+```bash
+cd plugin-attendance/backend
+./gradlew build
+java -jar build/libs/plugin-attendance.jar --spring.profiles.active=local
 ```
 
-Первый запуск занимает несколько минут: Gradle скачивает зависимости и Node. Для кнопки «Опубликовать сводку» во втором терминале запустите mock Result Gateway, без него публикация завершится статусом «не отправлена»:
+В PowerShell вместо `./gradlew` используйте `.\gradlew.bat`. Команды запуска выполняются из `backend`, чтобы Spring Boot нашёл внешний профиль `config/application-local.yml`.
 
-```shell
-.\gradlew.bat resultGatewayMock   # Windows; Linux, macOS: ./gradlew resultGatewayMock
+`build` выполняет тесты, собирает интерфейс и создаёт `backend/build/libs/plugin-attendance.jar`. Вместо запуска JAR можно использовать:
+
+```bash
+./gradlew bootRun --args='--spring.profiles.active=local'
 ```
 
-Потом откройте одну из страниц:
+Локально backend и интерфейс доступны на `http://127.0.0.1:18081`. Проверка запуска (в PowerShell используйте `curl.exe`):
 
-- <http://localhost:8081/dev-host.html> — плагин в iframe с `sandbox="allow-scripts"`, как в OpenVidu Meet, и кнопки «Вошёл», «Вышел», «Завершить звонок» и «Обрыв связи на 5 с».
-- <http://localhost:8081/?callId=demo> — страница плагина напрямую.
-
-Без кнопок событие можно отправить запросом:
-
-```shell
-# bash
-curl -X POST localhost:8081/dev/calls/demo/events -H 'Content-Type: application/json' \
-  -d '{"type":"participant.joined","participantId":"anna-0123456789abcde"}'
-
-# PowerShell
-Invoke-RestMethod -Method Post http://localhost:8081/dev/calls/demo/events -ContentType 'application/json' `
-  -Body '{"type":"participant.joined","participantId":"anna-0123456789abcde"}'
+```bash
+curl --fail-with-body http://127.0.0.1:18081/actuator/health
+curl --fail-with-body http://127.0.0.1:18081/api/info
 ```
 
-## С настоящим звонком на стенде
+Healthcheck подтверждает работу приложения. Подписка на звонок появляется после команды активации; до неё запрос состава возвращает 404.
 
-Звонок и подписка должны быть в одном окружении: без [профиля](#профили) `stage` backend подписывается на streamapi prod и звонков stage не видит.
+### Разработка интерфейса
 
-### Через dev-host.html
+Для отдельного запуска Vite нужен установленный Node.js 24. В другом терминале из каталога `plugin-attendance`:
 
-Подходит для prod и stage, деплой не нужен.
-
-1. Запустите backend без параметров: `.\gradlew.bat bootRun` (Windows) или `./gradlew bootRun`. Он подпишется на streamapi prod по адресу `calls.vareonix.cc:443`.
-2. Зайдите в звонок на <https://calls.vareonix.cc/meet/> и узнайте `callId` — это SID комнаты LiveKit вида `RM_…`, а не имя комнаты.
-   - Откройте DevTools (F12) → Network, отфильтруйте WS и выберите соединение `rtc?…` → вкладка Messages.
-   - Одно из первых входящих бинарных сообщений (JoinResponse) содержит SID. Переключите просмотр сообщения на UTF-8 и найдите `RM_`.
-   - Либо скопируйте сообщение как Base64 и выполните в консоли `atob('<base64>').match(/RM_\w+/)[0]`.
-3. Откройте <http://localhost:8081/dev-host.html?callId=RM_…>.
-4. Заходите в звонок и выходите из него со второй вкладки или с телефона: список меняется через одну–три секунды.
-
-### В окне Meet на stage
-
-Meet на stage собран из форка с плагинами, и плагин посещаемости в нём уже подключён (см. [Встраивание в Meet](#встраивание-в-meet)).
-
-1. Запустите backend с профилем `stage`.
-2. Сделайте его доступным по https по адресу плагина из `MEET_PLUGINS`, например туннелем на `localhost:8081`. Чтобы Meet открывал ваш backend, замените адрес в deployer на свой.
-3. Включите в браузере окружение stage, как описано в README [deployer](https://github.com/dwspurpleteam/deployer), и зайдите в звонок.
-4. Нажмите «Посещаемость» на панели Plugins: плагин откроется в окне звонка, `callId` Meet подставит сам.
-
-Другие окружения:
-
-- **stage**: включите [профиль](#профили) `stage`: `--args='--spring.profiles.active=stage'`. Он добавляет к подписке cookie окружения stage, без неё запросы уходят в prod.
-- **локальный streamapi**: `--attendance.streamapi.target=localhost:19090 --attendance.streamapi.plaintext=true`.
-
-Несколько параметров передаются через пробел: `--args='--server.port=8090 --attendance.source=fake'`.
-
-## Сводка через Result Gateway
-
-По [спецификации платформы](https://github.com/dwspurpleteam/specs) backend плагина не пишет в звонок сам: результаты и команды он отправляет в Result Gateway. Тот проверяет сообщение, адресатов и лимиты и доставляет результат участникам. Плагин посещаемости публикует так сводку.
-
-```mermaid
-sequenceDiagram
-    participant UI as Страница плагина
-    participant B as backend
-    participant RG as Result Gateway (mock)
-
-    UI->>B: POST api/calls/{callId}/summary
-    B->>RG: POST /v1/results, заголовок X-Callback-Url
-    RG-->>B: 202
-    B-->>UI: публикация ACCEPTED
-    Note over RG: через 1–3 с
-    RG->>B: POST /platform/deliveries, статус DELIVERED и исходное сообщение
-    B-->>RG: 204
-    UI->>B: GET api/calls/{callId}/participants, раз в 2 с
-    B-->>UI: публикация DELIVERED и доставленная сводка
+```bash
+cd frontend
+npm ci
+npm run dev
 ```
 
-- Сводку backend собирает по текущему составу звонка. Адресаты — все, кто сейчас в звонке, ревизия растёт с каждой публикацией.
-- Запрос UI ждёт только ответа Result Gateway о приёме, о доставке тот сообщает позже, по адресу из `X-Callback-Url`.
-- Доставки могут прийти в любом порядке: более старая ревизия, чем уже доставленная, отбрасывается.
-- Последняя доставленная сводка и статус последней публикации приходят в ответе `participants`. Сводку видят все, у кого открыт плагин в этом звонке.
+Откройте `http://localhost:5173/?callId=RM_REAL_CALL_ID`. Vite проксирует `/api` на локальный backend `127.0.0.1:18081`; backend запускается с профилем `local`.
 
-Сообщение в Result Gateway — формат `call.result` из спецификации:
+## Профили и настройки
 
-```json
-{
-  "type": "call.result",
-  "messageId": "0b9c2a52-…",
-  "callId": "RM_xxx",
-  "recipients": ["anna-0123456789abcde", "boris-zzzzzzzzzzzzzzz"],
-  "key": "attendance.summary",
-  "revision": 3,
-  "payload": {
-    "composedAt": "2026-10-22T11:20:00Z",
-    "trackingSince": "2026-10-22T11:05:00Z",
-    "present": 2,
-    "left": 1,
-    "publishedBy": "anna-0123456789abcde"
-  }
-}
+Общие параметры находятся в [application.yml](backend/src/main/resources/application.yml). Профиль выбирается явно через `--spring.profiles.active` или `SPRING_PROFILES_ACTIVE`.
+
+| Профиль | Файл | HTTP | StreamAPI | TLS |
+|---|---|---|---|---|
+| `local` | [config/application-local.yml](backend/config/application-local.yml) | `127.0.0.1:18081` | `calls.vareonix.cc:443` | Да |
+| `prod` | [application-prod.yml](backend/src/main/resources/application-prod.yml) | `0.0.0.0:8081` | `nginx:19090` | Нет, внутренняя Docker-сеть |
+| `stage` | [application-stage.yml](backend/src/main/resources/application-stage.yml) | `0.0.0.0:8081` | `nginx-stage:19090` | Нет, внутренняя Docker-сеть |
+
+Локальный профиль находится вне ресурсов и не попадает в JAR или Docker-образ. Серверные профили рассчитаны на Docker-сеть соответствующего окружения. Deployer задаёт `SPRING_PROFILES_ACTIVE=prod` или `stage` при запуске контейнера.
+
+| Параметр | Значение по умолчанию | Назначение |
+|---|---|---|
+| `attendance.activation.start-timeout` | `4s` | Ожидание подключения при активации; должно быть короче HTTP-таймаута Plugin Manager |
+| `attendance.streamapi.target` | Из профиля | Адрес gRPC StreamAPI |
+| `attendance.streamapi.plaintext` | Из профиля | Подключение без TLS |
+| `attendance.streamapi.metadata` | Пустая map | Дополнительные gRPC-заголовки |
+| `attendance.tracking.max-calls` | `100` | Максимальное число хранимых трекеров |
+| `attendance.tracking.failed-retention` | `1m` | Хранение завершённых и отказавших трекеров |
+| `attendance.tracking.cleanup-interval` | `30s` | Период очистки трекеров |
+| `attendance.tracking.ignored-participant-prefixes` | `streamapi-`, `EG_` | Служебные участники, исключаемые из учёта |
+
+`activationId` и `activationSecret` поступают в control-сообщении от Plugin Manager. SDK использует их для авторизации подписки; глобальный ключ менеджера плагину не нужен.
+
+## Проверка на звонке
+
+### Через серверный Plugin Manager
+
+Для серверного экземпляра сначала зарегистрируйте [манифест версии 1.0.1](manifests/plugin-attendance-1.0.1-manifest-1.1.json) в Plugin Registry и разверните соответствующую сборку плагина.
+
+Создайте звонок, получите его `callId` и отправьте запрос (пример для Bash):
+
+```bash
+curl --fail-with-body --request POST 'https://calls.vareonix.cc/v1/activations' \
+  --header 'Content-Type: application/json' \
+  --data '{
+    "callId": "RM_REAL_CALL_ID",
+    "pluginId": "attendance",
+    "pluginVersion": "1.0.1",
+    "pluginRegistryId": "local",
+    "requestedBy": "manual",
+    "idempotencyKey": "REPLACE_WITH_UNIQUE_KEY"
+  }'
 ```
 
-Отчёт о доставке — исходное сообщение целиком и статус: `{"status": "DELIVERED", "reason": null, "message": {…}}`, при отказе `REJECTED` и причина.
+`callId` — SID комнаты LiveKit вида `RM_...`. Для новой активации задавайте новый `idempotencyKey`; повтор того же запроса с прежним ключом возвращает прежний `activationId`.
 
-Статусы публикации:
+По возвращённому ID проверьте состояние менеджера и состав звонка:
 
-| Статус | Что произошло |
-| --- | --- |
-| `SENDING` | Сообщение отправляется в Result Gateway |
-| `ACCEPTED` | Result Gateway принял сообщение (2xx), ждём отчёта о доставке |
-| `DELIVERED` | Пришёл отчёт о доставке |
-| `REJECTED` | Result Gateway отклонил сообщение (4xx или отчёт с отказом), причина в `reason` |
-| `FAILED` | Result Gateway недоступен, не ответил вовремя или ответил 5xx |
-
-### Mock Result Gateway
-
-Задача `resultGatewayMock` запускает WireMock на порту 8089 с маппингами из `wiremock/mappings/`:
-
-- `results-accept.json` — отвечает `202` и через 1–3 с отправляет отчёт `DELIVERED` по адресу из `X-Callback-Url`;
-- `results-reject-empty-recipients.json` — отвечает `422` на сообщение с пустым `recipients`, например если публиковать после завершения звонка.
-
-Полученные сообщения видны в журнале WireMock: <http://localhost:8089/__admin/requests>, а с `--verbose` — и в консоли. Чтобы проверить статус `FAILED`, остановите mock (Ctrl+C). Тот же WireMock можно запустить и без Gradle: `java -jar wiremock-standalone-3.13.2.jar --port 8089 --root-dir plugin-attendance/wiremock`.
-
-Если WireMock работает не на той машине, что backend, например в Docker, задайте адрес для отчёта явно: `--attendance.result-gateway.callback-url=http://host.docker.internal:8081/platform/deliveries`.
-
-## Сборка и запуск jar
-
-Из `backend/`:
-
-```shell
-.\gradlew.bat build    # тесты, сборка frontend и assembly/build/libs/plugin-attendance.jar
-java -jar assembly/build/libs/plugin-attendance.jar --attendance.source=fake
+```bash
+curl --fail-with-body https://calls.vareonix.cc/v1/activations/ACTIVATION_ID
+curl --fail-with-body https://calls.vareonix.cc/apps/plugin-attendance/api/calls/RM_REAL_CALL_ID/participants
 ```
 
-## Разработка фронтенда
+Ожидаются `ACTIVE` у Plugin Manager и `TRACKING` в API плагина. Менеджер доставляет секрет непосредственно backend плагина; вручную придумывать его не нужно.
 
-Для hot reload запустите backend в демо-режиме, а во втором терминале — Vite:
+Откройте страницу:
 
-```shell
-cd plugins/plugin-attendance/backend; .\gradlew.bat npm_run_dev   # Node, скачанный Gradle
-cd plugins/plugin-attendance/frontend; npm run dev                # или свой Node 20.19+ / 22.12+
+```text
+https://calls.vareonix.cc/apps/plugin-attendance/?callId=RM_REAL_CALL_ID
 ```
 
-Страница будет на <http://localhost:5173/?callId=demo>, запросы `api/` Vite перенаправляет на `localhost:8081`. Страница `dev-host.html` относится к backend: она работает только на порту 8081 и показывает уже собранный фронтенд.
+Затем выполните вход и выход проверяемого участника: списки `present` и `left` должны обновиться.
 
-## Настройки backend
+### Локальный плагин с серверным StreamAPI
 
-Задаются аргументами `--имя=значение`, переменными окружения (`ATTENDANCE_SOURCE=fake`), в файлах [профилей](#профили) или в `backend/assembly/src/main/resources/application.yaml`. Приоритет убывает в том же порядке.
+Профиль `local` подключается к серверному StreamAPI по TLS. Для доставки команды от серверного Plugin Manager локальный backend должен быть доступен ему по HTTPS с маршрутами `/actuator/health` и `/control`. Для такого запуска создайте отдельную тестовую версию манифеста с адресом локального экземпляра.
 
-| Свойство | По умолчанию | Назначение |
-| --- | --- | --- |
-| `attendance.source` | `streamapi` | Источник событий: `streamapi` или `fake` |
-| `server.port` | `8081` | HTTP-порт плагина |
-| `attendance.streamapi.target` | `calls.vareonix.cc:443` | Адрес gRPC streamapi; внутри docker-сети стенда `nginx:19090` |
-| `attendance.streamapi.plaintext` | `false` | Подключение без TLS |
-| `attendance.streamapi.metadata.<заголовок>` | — | Дополнительные заголовки подписки, например cookie для stage |
-| `attendance.tracking.idle-timeout` | `10m` | Через сколько без запросов UI отслеживание звонка останавливается |
-| `attendance.tracking.max-calls` | `100` | Сколько звонков отслеживается одновременно |
-| `attendance.tracking.ignored-participant-prefixes` | `streamapi-`, `EG_` | Служебные участники: скрытый получатель streamapi, запись |
-| `attendance.fake.event-interval` | `6s` | Как часто генератор меняет состав; `0s` — только события из кнопок и запросов |
-| `attendance.result-gateway.url` | `http://localhost:8089` | Адрес Result Gateway; по умолчанию mock из `resultGatewayMock` |
-| `attendance.result-gateway.callback-url` | `/platform/deliveries` этого процесса на localhost | Куда Result Gateway отправляет отчёт о доставке |
-| `attendance.result-gateway.connect-timeout` | `2s` | Сколько ждать соединения с Result Gateway |
-| `attendance.result-gateway.read-timeout` | `5s` | Сколько ждать ответа о приёме сообщения |
+[Инструкция локальной проверки](docs/manual-sdk-tracking.md). [Коллекция Bruno](bruno/bruno.json) содержит прямой вызов `/control` и чтение состояния: откройте папку `bruno` как коллекцию, выберите окружение и заполните параметры. Для прямого вызова нужны ID и секрет существующей активации из Plugin Manager.
 
-Остальные настройки, например паузы переподключения к streamapi и параметры генератора `fake`, описаны комментариями в `application.yaml`.
+После активации локальная страница доступна по адресу `http://127.0.0.1:18081/?callId=RM_REAL_CALL_ID`. Необязательные параметры `roomId` и `participantId` задают имя комнаты внизу страницы и выделение текущего участника. Подписанный контекст запуска пока не реализован.
 
-### Профили
+## HTTP API и состояния
 
-Настройки окружений лежат в `backend/assembly/config/application-<профиль>.yml`. Сейчас профиль один — `stage`, он задаёт cookie для подписки на streamapi stage. Без профиля backend работает с prod.
+Пути указаны относительно backend. На сервере к ним добавляется префикс `/apps/plugin-attendance`; NGINX удаляет его перед передачей запроса в приложение.
 
-В git файл `application-stage.yml` лежит с заглушкой `<secret>`. Замените её на секрет окружения stage и не коммитьте эту правку. Пока заглушка на месте, backend с профилем `stage` не запустится и назовёт причину: иначе подписка молча ушла бы в prod.
+| Метод | Путь | Назначение |
+|---|---|---|
+| GET | `/` | Интерфейс плагина, `callId` передаётся в query string |
+| POST | `/control` | Запуск активации с ожиданием подключения к StreamAPI |
+| GET | `/api/info` | Источник событий, адрес StreamAPI и версия приложения |
+| GET | `/api/calls/{callId}/participants` | Состояние подписки, участники и перерывы связи |
+| GET | `/actuator/health` | Healthcheck приложения |
+| GET | `/actuator/info` | Информация о сборке Spring Boot |
 
-Профиль включается аргументом `--spring.profiles.active=stage`: в `bootRun` — через `--args='--spring.profiles.active=stage'`, в IDE — полем Active profiles или тем же аргументом. Файл профиля находится, если процесс запущен из `backend` или из `backend/assembly`, так что подходят и `bootRun`, и запуск jar, и IDE с рабочей папкой по умолчанию.
+Запрос участников читает уже созданный трекер. Для неизвестного звонка возвращается 404. Снимок содержит `present`, `left`, `trackingSince`, `endedAt`, `gaps`, `serverTime` и состояние подписки:
 
-Какое окружение получилось, видно в `GET /api/info`, на странице `dev-host.html` и в логе при старте (`Event source: streamapi …`). Со stage там `заголовки: cookie`, без профиля — `без доп. заголовков`. Если плагин показывает «Онлайн», но вошедшие участники не появляются, проверьте первым делом это: подписка в prod на звонок stage принимается, но событий не получает.
+| Состояние плагина | Значение |
+|---|---|
+| `CONNECTING` | Первая подписка ещё не установлена |
+| `TRACKING` | Подписка активна |
+| `RECONNECTING` | Связь потеряна после начала учёта; SDK переподключается |
+| `ENDED` | Получено событие завершения звонка |
+| `FAILED` | Подписка завершилась ошибкой |
 
-## API backend
+Это состояния трекера плагина. Состояние активации платформы читается отдельно через Plugin Manager.
 
-| Запрос | Ответ |
-| --- | --- |
-| `GET /api/calls/{callId}/participants` | Состав звонка. Первый запрос запускает отслеживание |
-| `POST /api/calls/{callId}/summary?participantId=…` | Публикует сводку через Result Gateway и возвращает статус публикации. `participantId` необязателен, он попадает в сводку как автор. Отказ и недоступность Result Gateway — это статусы `REJECTED` и `FAILED`, а не ошибки запроса |
-| `POST /platform/deliveries` | Отчёт Result Gateway о доставке. `404`, если звонок уже не отслеживается |
-| `GET /api/info` | Источник событий, адрес Result Gateway и версия |
-| `GET /actuator/health` | Проверка доступности |
-| `POST /dev/calls/{callId}/events` | Только в демо-режиме. Тело `{"type": "participant.joined", "participantId": "…"}`; без `participantId` войдёт случайный участник или выйдет случайный присутствующий. Типы: `participant.joined`, `participant.left`, `call.ended` |
-| `POST /dev/calls/{callId}/connection-loss?seconds=5` | Только в демо-режиме: имитация обрыва связи с источником |
+Начальный состав пока не обрабатывается: `initialContext` принимается, но не применяется; актуальный манифест задаёт `initial-state: []`. Участник, вошедший до подписки, появится после нового события: повторного входа либо выхода с неизвестным временем входа. Снимок хранит последнее известное состояние каждого участника.
 
-Пример ответа о составе звонка:
+После разрыва соединения события за перерыв могут быть потеряны; перерывы отражаются в `gaps` и интерфейсе. Подписка закрывается по `call.ended`, окончательной ошибке SDK или при завершении приложения. Завершённые и отказавшие трекеры удаляются по настройкам retention и cleanup. HTTP-команды ручной остановки нет.
 
-```json
-{
-  "callId": "RM_xxx",
-  "source": "streamapi",
-  "status": "TRACKING",
-  "statusMessage": null,
-  "trackingSince": "2026-10-22T11:05:00.123Z",
-  "endedAt": null,
-  "gaps": [{ "from": "2026-10-22T11:07:03Z", "to": "2026-10-22T11:07:05Z" }],
-  "serverTime": "2026-10-22T11:20:00.456Z",
-  "present": [{ "participantId": "anna-0123456789abcde", "joinedAt": "2026-10-22T11:06:00Z", "leftAt": null }],
-  "left": [{ "participantId": "boris-zzzzzzzzzzzzzzz", "joinedAt": null, "leftAt": "2026-10-22T11:10:00Z" }],
-  "summary": {
-    "publication": {
-      "messageId": "0b9c2a52-…",
-      "revision": 3,
-      "status": "DELIVERED",
-      "reason": null,
-      "requestedAt": "2026-10-22T11:20:00Z",
-      "updatedAt": "2026-10-22T11:20:02Z"
-    },
-    "delivered": {
-      "revision": 3,
-      "deliveredAt": "2026-10-22T11:20:02Z",
-      "recipients": 1,
-      "summary": { "composedAt": "2026-10-22T11:20:00Z", "trackingSince": "2026-10-22T11:05:00Z", "present": 1, "left": 1, "publishedBy": "anna-0123456789abcde" }
-    }
-  }
-}
+Состояние хранится в памяти одного процесса. После перезапуска оно теряется, а для возобновления подписки менеджер должен повторно доставить команду активации. Развёртывание рассчитано на одну реплику.
+
+## Манифесты и выпуск
+
+Шаблон имени: `plugin-{pluginId}-{pluginVersion}-manifest-{manifestVersion}.json`. Версии плагина и схемы берутся из полей `plugin-version` и `manifest-version` внутри JSON.
+
+| Версия плагина | Манифест |
+|---|---|
+| `1.0.1` | [plugin-attendance-1.0.1-manifest-1.1.json](manifests/plugin-attendance-1.0.1-manifest-1.1.json) — текущий выпуск |
+| `0.1.0` | [plugin-attendance-0.1.0-manifest-1.1.json](manifests/plugin-attendance-0.1.0-manifest-1.1.json) — историческая версия |
+
+Содержимое существующих манифестов неизменяемо. Для новой версии создаётся отдельный файл и отдельная запись версии в Plugin Registry.
+
+[Dockerfile](Dockerfile) упаковывает готовый `backend/build/libs/plugin-attendance.jar`. Для ручной сборки сначала выполните Gradle `build` в `backend`, затем `make image-build` в `plugin-attendance` (нужны Docker и Make). Профиль выбирается при запуске контейнера.
+
+[Workflow plugin-attendance](../.github/workflows/plugin-attendance.yml) на каждой ветке собирает и тестирует JAR. После push в `main` он также публикует образ `ghcr.io/dwspurpleteam/attendance:<commit SHA>` и отправляет событие в deployer. Workflow `images` в deployer создаёт PR с новым тегом образа.
+
+В CI Gradle использует `GITHUB_ACTOR` и `GITHUB_TOKEN`; репозиторию `plugins` нужен доступ к Maven-пакету SDK. Для отправки события в deployer общему workflow требуется секрет `DEPLOYER_TOKEN`.
+
+Изменения deployer сначала объединяются с `dev`, после проверки — с `main` для выкладки в prod. Профиль `stage` подготовлен, но включение stage-сервиса управляется отдельно в deployer. При первом переходе на серверные профили сначала обновляется образ плагина, затем параметры его запуска. [Порядок обновления и серверная проверка](https://github.com/dwspurpleteam/deployer/blob/dev/docs/attendance-deployment.md).
+
+## Тесты и структура проекта
+
+Из `backend`:
+
+```bash
+./gradlew test
 ```
 
-`summary.publication` и `summary.delivered` равны `null`, пока сводку не публиковали и пока ни одна публикация не доставлена.
+Тесты проверяют обработку участников, повторы активации, ошибки и таймауты `/control`, работу SDK с тестовым gRPC-сервером и загрузку профилей. Тестовые источники событий и контроллеры находятся только в `src/test`. Отчёт: `backend/build/reports/tests/test/index.html`.
 
-Возможные статусы:
-
-- `CONNECTING` — подписка ещё не установилась.
-- `TRACKING` — события приходят.
-- `RECONNECTING` — связь потеряна, плагин переподключается.
-- `ENDED` — звонок завершён.
-- `FAILED` — streamapi отказал в подписке, повтор через минуту.
-
-`joinedAt: null` означает, что участник вошёл до начала отслеживания. Ошибки приходят в формате `application/problem+json`, текст для пользователя лежит в поле `detail`.
-
-## Встраивание в Meet
-
-Окна плагинов есть в форке [openvidu-meet](https://github.com/dwspurpleteam/openvidu-meet), ветка `feat/iframe-to-plugin`. Список плагинов Meet берёт из переменной окружения `MEET_PLUGINS`:
-
-```json
-[{"id": "attendance", "title": "Посещаемость", "url": "https://<адрес плагина>/"}]
-```
-
-На панели Plugins в звонке у каждого плагина своя кнопка: она открывает и закрывает окно с iframe. Пока нет подписанного контекста запуска, Meet передаёт контекст в адресе:
-
-```
-<url>?callId=<room.sid>&roomId=<room.name>&participantId=<identity>
-```
-
-- Окно — iframe с `sandbox="allow-scripts"`. У такой страницы opaque origin, поэтому плагин не использует cookies и `localStorage`, а backend отдаёт и API, и статику с `Access-Control-Allow-Origin: *`.
-- Адрес страницы должен заканчиваться на `/`: пути к ассетам и API относительные, так что плагин работает и под префиксом вроде `/plugins/attendance/`.
-- Meet открыт по https, поэтому адрес плагина тоже должен быть https и открываться из браузеров участников: iframe по http браузер заблокирует.
-- На stage `MEET_PLUGINS` задан в [deployer](https://github.com/dwspurpleteam/deployer): ветка `dev`, файл `apps/calls/meet/vars/base.yaml`. На prod работает исходный Meet, плагинов в нём нет.
-
-## Ограничения версии 0.1
-
-- Учитываются только входы после начала отслеживания, то есть после первого открытия плагина в звонке: streamapi не отдаёт историю и текущий состав. Кто вышел, не войдя на наших глазах, показан с пометкой «вход до начала отслеживания».
-- Имён в событиях нет, только identity LiveKit. Имя гостя восстанавливается из латинского префикса identity. Кириллические имена Meet заменяет на `participant`, такие гости показаны как «Участник #метка».
-- Состояние живёт в памяти одного процесса: перезапуск обнуляет списки, несколько реплик не поддерживаются.
-- Авторизации нет: состав звонка видит любой, кто знает `callId`.
-- Время событий LiveKit округлено до секунды. Вход и выход в одну и ту же секунду применяются в порядке прихода.
-- События, пришедшие во время обрыва связи со streamapi, теряются, и плагин предупреждает, что список может быть неточным.
-- Сводка отправляется в Result Gateway синхронно: если он медленный или недоступен, кнопка ждёт до `read-timeout`. Очереди и повторов пока нет.
-- В сообщении нет `activationId`: контекст запуска его пока не содержит. Сообщения и отчёты о доставке не подписаны, `POST /platform/deliveries` принимает отчёт от кого угодно.
-- Доставленную сводку видят все, у кого открыт плагин в звонке, а не только адресаты.
-
-## Тесты
-
-Из `backend/`:
-
-```shell
-.\gradlew.bat test
-```
-
-Тесты покрывают:
-
-- в `core` — логику трекера и реестра звонков, статусы публикаций сводки, gRPC-адаптер против in-process сервера, который ведёт себя как streamapi, и HTTP-клиент Result Gateway против WireMock;
-- в `assembly` — приложение целиком в демо-режиме: страницу, CORS для sandbox-iframe, API и публикацию сводки через WireMock с маппингами из `wiremock/`.
-
-Отдельной команды для фронтенда нет: проверка типов TypeScript входит в его сборку (`npm run build`).
-
-CI запускает `./gradlew build`, то есть тесты и сборку jar, на каждый пуш, подробнее — в [README репозитория](../README.md#ci).
-
-## Структура
-
-```
-frontend/
-  src/                    React-приложение: опрос API, список участников, публикация сводки
-  public/                 статика, которая копируется в сборку как есть
-  package.json, vite.config.ts, tsconfig.json
+```text
 backend/
-  core/                     код плагина, обычная библиотека
-    src/main/java/ru/itmo/plugins/attendance/
-      api/                  REST: состав звонка, публикация сводки, /platform/deliveries, /api/info, /dev/* для демо-режима
-      tracking/             CallTracker — состав одного звонка, CallRegistry — какие звонки отслеживаются,
-                            SummaryBoard — публикации сводки звонка
-      summary/              SummaryPublisher — собирает сводку и отправляет её в Result Gateway
-      gateway/              ResultGateway и HTTP-клиент, формат сообщений и отчётов о доставке
-      events/               EventSource и реализации: streamapi (gRPC) и fake
-      config/               CORS для sandbox-iframe, проверки настроек
-    src/main/proto/streamapi/v1/events.proto   копия контракта streamapi v1.1.0 с java-опциями
-  assembly/                 приложение: собирает core и frontend в исполняемый jar
-    src/main/java/ru/itmo/plugins/attendance/AttendanceApplication.java   main class
-    src/main/resources/application.yaml        настройки по умолчанию
-    src/main/resources/static/dev-host.html    страница «плагин в окне Meet» для демо-режима
-    config/application-stage.yml               профиль stage: cookie для streamapi stage
-  settings.gradle.kts, build.gradle.kts, gradle/libs.versions.toml, gradlew
-wiremock/
-  mappings/                 mock Result Gateway: приём сводки с отчётом о доставке, отказ без адресатов
+  config/                       Внешний профиль local
+  src/main/java/ru/itmo/plugins/attendance/
+    PluginAttendanceApplication.java
+    web/                        HTTP-контроллеры и ошибки API
+    configuration/              Spring-конфигурация и свойства
+    service/
+      activation/               Контракт и данные активации
+      events/                   Интерфейс источника и типы событий
+      streamapi/                Адаптер Java SDK
+      tracking/                 Состояние звонка и участников
+  src/main/resources/           Общие настройки и профили prod/stage
+  src/test/                     Тесты и gRPC fixtures
+frontend/                       React/TypeScript-интерфейс
+manifests/                      Манифесты версий плагина
+bruno/                          Запросы для проверки
 ```
 
-Версии зависимостей лежат в `backend/gradle/libs.versions.toml` (там же версия Node для сборки) и `frontend/package.json`. Версии gRPC и protobuf задаёт BOM Spring Boot.
+Java SDK используется в `service.streamapi`; трекеры работают через интерфейс `EventSource`. Точка входа приложения — `PluginAttendanceApplication`.

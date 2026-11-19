@@ -1,4 +1,4 @@
-import type { CallSnapshot, Publication } from './types';
+import type { CallSnapshot } from './types';
 
 export class ApiError extends Error {
   /** HTTP-статус; 0, если сервер плагина недоступен. */
@@ -18,16 +18,6 @@ export class ApiError extends Error {
 export async function fetchSnapshot(callId: string, signal: AbortSignal): Promise<CallSnapshot> {
   const response = await request(`api/calls/${encodeURIComponent(callId)}/participants`, { signal });
   return (await response.json()) as CallSnapshot;
-}
-
-/**
- * Публикует сводку через Result Gateway. POST без тела и заголовков — тоже простой запрос, без preflight.
- * Отказ Result Gateway приходит статусом публикации, а не ошибкой.
- */
-export async function publishSummary(callId: string, participantId: string | null): Promise<Publication> {
-  const query = participantId ? `?participantId=${encodeURIComponent(participantId)}` : '';
-  const response = await request(`api/calls/${encodeURIComponent(callId)}/summary${query}`, { method: 'POST' });
-  return (await response.json()) as Publication;
 }
 
 async function request(path: string, init: RequestInit): Promise<Response> {
