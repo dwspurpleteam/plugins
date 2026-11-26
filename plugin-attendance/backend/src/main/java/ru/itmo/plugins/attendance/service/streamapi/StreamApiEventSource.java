@@ -2,6 +2,7 @@ package ru.itmo.plugins.attendance.service.streamapi;
 
 import java.time.Clock;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
@@ -54,10 +55,16 @@ public class StreamApiEventSource implements EventSource, DisposableBean {
 
     @Override
     public Subscription subscribe(String callId, ActivationCredentials credentials, Listener listener) {
+        UUID activationId = credentials.activationId();
+        log.debug("Starting StreamAPI subscription for activation {} and call {}, target={}",
+                activationId, callId, properties.target());
         var client = openClient(credentials);
         try {
-            var subscription = client.subscribeEvents(callId, ATTENDANCE_EVENTS, listenerFor(callId, listener));
+            var subscription = client.subscribeEvents(callId, ATTENDANCE_EVENTS,
+                    listenerFor(activationId, callId, listener));
             subscription.completion().whenComplete((end, error) -> {
+                log.debug("StreamAPI subscription finished for activation {} and call {}: {}",
+                        activationId, callId, error == null ? end : error.getClass().getSimpleName());
                 closeClient(client);
                 if (end == SubscriptionEnd.REMOTE_COMPLETED) {
                     listener.onFailed("REMOTE_COMPLETED: event stream closed by server");
@@ -89,11 +96,11 @@ public class StreamApiEventSource implements EventSource, DisposableBean {
         return client;
     }
 
-    private EventListener listenerFor(String callId, Listener listener) {
+    private EventListener listenerFor(UUID activationId, String callId, Listener listener) {
         return new EventListener() {
             @Override
             public void onConnected() {
-                log.info("Subscribed to events of call {} via SDK", callId);
+                log.info("StreamAPI subscribed for activation {} and call {}", activationId, callId);
                 listener.onConnected();
             }
 
@@ -106,12 +113,15 @@ public class StreamApiEventSource implements EventSource, DisposableBean {
 
             @Override
             public void onDisconnected(StreamFailure failure) {
+                log.debug("StreamAPI disconnected for activation {} and call {}: {}; SDK will retry",
+                        activationId, callId, failure.code());
                 listener.onDisconnected(reason(failure));
             }
 
             @Override
             public void onFailed(StreamFailure failure) {
-                log.warn("SDK subscription of call {} failed: {}", callId, reason(failure));
+                log.warn("StreamAPI subscription failed for activation {} and call {}: {}",
+                        activationId, callId, failure.code());
                 listener.onFailed(reason(failure));
             }
         };

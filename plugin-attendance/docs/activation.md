@@ -35,6 +35,18 @@ HTTP 200 возвращается после SDK `onConnected()` с телом:
 
 Поля initialContext принимаются для совместимости с менеджером, но начальный состав **не применяется**. Начальный снимок остаётся пустым; учёт строится только по новым событиям после подключения. В примере манифеста `initial-state: []`.
 
+## Диагностика
+
+Профиль `local` включает DEBUG для attendance и пишет логи в консоль и `backend/logs/attendance.log` при запуске из каталога `backend`. Файл ротируется при достижении 10 МБ, архивы хранятся за 7 дней с общим лимитом 100 МБ. Путь можно изменить через `logging.file.name` в `config/application-local.yml`. Изменения конфигурации применяются после перезапуска приложения.
+
+Для других профилей DEBUG можно включить аргументом `--logging.level.ru.itmo.plugins.attendance=DEBUG` в **Program arguments** IntelliJ или при запуске из PowerShell.
+
+```powershell
+.\gradlew.bat bootRun --args='--spring.profiles.active=local'
+```
+
+Строки `HTTP #… started` и `HTTP #… completed` показывают начало и конец запроса, его путь, статус и длительность. По ним видно, дошли ли до backend `GET /actuator/health` и `POST /control`. По `activationId` можно сопоставить обработку команды с запуском подписки StreamAPI и логами Plugin Manager. Тела HTTP-запросов, заголовки и параметры URL в эти логи не попадают.
+
 ## Чтение состояния
 
 ```bash

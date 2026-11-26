@@ -13,8 +13,11 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 import tools.jackson.databind.json.JsonMapper;
 
 import ru.itmo.plugins.attendance.service.tracking.CallSnapshot.Participant;
@@ -25,6 +28,7 @@ import ru.itmo.plugins.attendance.service.tracking.CallStatus;
 @SpringBootTest(
         webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
         properties = {
+            "logging.level.ru.itmo.plugins.attendance=DEBUG",
             "attendance.source=fake",
             "attendance.streamapi.target=unused:19090",
             "attendance.fake.connect-delay=0s",
@@ -32,6 +36,7 @@ import ru.itmo.plugins.attendance.service.tracking.CallStatus;
             "attendance.fake.event-interval=0s",
             "attendance.fake.max-participants=10"
         })
+@ExtendWith(OutputCaptureExtension.class)
 class PluginAttendanceApplicationTest {
 
     private static final String ANNA = "anna-0123456789abcde";
@@ -73,6 +78,20 @@ class PluginAttendanceApplicationTest {
         CallSnapshot left = await(participants, snapshot -> !snapshot.left().isEmpty());
         assertThat(left.present()).isEmpty();
         assertThat(left.left()).extracting(Participant::participantId).containsExactly(ANNA);
+    }
+
+    @Test
+    void logsHttpRequestsWithoutCredentialsOrQueryParameters(CapturedOutput output) throws Exception {
+        assertThat(get("/actuator/health", null).statusCode()).isEqualTo(200);
+        activate("RM_logging");
+        assertThat(get("/api/calls/RM_logging/participants?probe=hidden-query-value", null).statusCode())
+                .isEqualTo(200);
+
+        assertThat(output.getAll())
+                .containsPattern("HTTP #\\d+ started: POST /control")
+                .containsPattern("HTTP #\\d+ completed: POST /control -> 200 in \\d+ ms")
+                .contains("GET /actuator/health -> 200", "GET /api/calls/RM_logging/participants -> 200")
+                .doesNotContain("test-secret", "hidden-query-value");
     }
 
     @Test

@@ -7,3 +7,14 @@ attendance:
   streamapi:
     target: calls.vareonix.cc:443
     plaintext: false
+
+logging:
+  file:
+    name: logs/attendance.log
+  logback:
+    rollingpolicy:
+      max-file-size: 10MB
+      max-history: 7
+      total-size-cap: 100MB
+  level:
+    ru.itmo.plugins.attendance: DEBUG

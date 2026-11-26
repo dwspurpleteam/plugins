@@ -86,6 +86,7 @@ public final class CallTracker implements EventSource.Listener {
         Instant now = clock.instant();
         if (trackingSince == null) {
             trackingSince = now;
+            log.debug("Call {} started tracking: knownParticipantCount={}", callId, visits.size());
         }
         closeGap(now);
         status = CallStatus.TRACKING;
@@ -134,6 +135,8 @@ public final class CallTracker implements EventSource.Listener {
             if (!event.id().isEmpty() && !recentEventIds.add(event.id())) {
                 return;
             }
+            log.debug("Processing attendance event {} for call {} (occurredAt={})",
+                    event.type(), callId, event.occurredAt());
             switch (event.type()) {
                 case PARTICIPANT_JOINED -> join(event.participantId(), event.occurredAt());
                 case PARTICIPANT_LEFT -> leave(event.participantId(), event.occurredAt());
