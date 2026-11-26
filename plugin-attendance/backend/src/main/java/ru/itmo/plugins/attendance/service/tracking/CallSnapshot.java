@@ -7,6 +7,7 @@ import java.util.List;
  * Состав звонка на момент запроса; ответ {@code GET /api/calls/{callId}/participants}.
  *
  * @param trackingSince начало учёта присутствия; {@code null}, пока подписка не установилась
+ * @param stoppedAt     остановка отслеживания; открытые визиты после неё не растут
  * @param gaps          перерывы связи с источником, последний может быть ещё открыт
  * @param serverTime    время сервера, по нему клиент считает длительность без учёта своих часов
  * @param present       кто сейчас в звонке, по времени входа
@@ -19,6 +20,7 @@ public record CallSnapshot(
         String statusMessage,
         Instant trackingSince,
         Instant endedAt,
+        Instant stoppedAt,
         List<Gap> gaps,
         Instant serverTime,
         List<Participant> present,

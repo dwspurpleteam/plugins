@@ -13,11 +13,13 @@ export interface SnapshotState {
   clockOffsetMs: number;
 }
 
+const EMPTY_STATE: SnapshotState = { snapshot: null, error: null, clockOffsetMs: 0 };
+
 /**
  * Опрашивает состав звонка. Пока вкладка скрыта, запросов нет; после ошибок интервал растёт.
  */
 export function useSnapshot(callId: string): SnapshotState {
-  const [state, setState] = useState<SnapshotState>({ snapshot: null, error: null, clockOffsetMs: 0 });
+  const [state, setState] = useState<SnapshotState & { callId: string }>({ ...EMPTY_STATE, callId });
 
   useEffect(() => {
     let disposed = false;
@@ -25,6 +27,7 @@ export function useSnapshot(callId: string): SnapshotState {
     let timer: number | undefined;
     let controller: AbortController | undefined;
     let failures = 0;
+    setState({ ...EMPTY_STATE, callId });
 
     const schedule = (delayMs: number) => {
       if (!disposed && !document.hidden) {
@@ -34,16 +37,26 @@ export function useSnapshot(callId: string): SnapshotState {
 
     const poll = async () => {
       timer = undefined;
+      if (disposed || inFlight || document.hidden) return;
       inFlight = true;
+      let nextDelay: number | null = null;
       const current = new AbortController();
       controller = current;
       try {
         const snapshot = await fetchSnapshot(callId, current.signal);
+        if (disposed) return;
+        if (current.signal.aborted) {
+          nextDelay = 0;
+          return;
+        }
         failures = 0;
-        setState({ snapshot, error: null, clockOffsetMs: Date.parse(snapshot.serverTime) - Date.now() });
-        schedule(snapshot.status === 'ENDED' ? ENDED_POLL_MS : POLL_MS);
+        setState({ callId, snapshot, error: null, clockOffsetMs: Date.parse(snapshot.serverTime) - Date.now() });
+        nextDelay = snapshot.status === 'ENDED' || snapshot.status === 'FAILED' ? ENDED_POLL_MS : POLL_MS;
       } catch (error) {
-        if (disposed || current.signal.aborted) {
+        if (disposed) return;
+        if (current.signal.aborted) {
+          // Visibility may have changed back while the cancelled request was still settling.
+          nextDelay = 0;
           return;
         }
         const apiError = error instanceof ApiError ? error : new ApiError('Не удалось получить данные', 0);
@@ -51,10 +64,12 @@ export function useSnapshot(callId: string): SnapshotState {
         setState((previous) => ({ ...previous, error: apiError }));
         // Неверный callId повтором не исправится.
         if (apiError.status !== 400) {
-          schedule(Math.min(POLL_MS * 2 ** failures, MAX_RETRY_MS));
+          nextDelay = Math.min(POLL_MS * 2 ** failures, MAX_RETRY_MS);
         }
       } finally {
         inFlight = false;
+        controller = undefined;
+        if (nextDelay !== null) schedule(nextDelay);
       }
     };
 
@@ -79,5 +94,5 @@ export function useSnapshot(callId: string): SnapshotState {
     };
   }, [callId]);
 
-  return state;
+  return state.callId === callId ? state : EMPTY_STATE;
 }

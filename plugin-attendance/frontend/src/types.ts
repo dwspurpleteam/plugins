@@ -6,6 +6,7 @@ export interface CallSnapshot {
   statusMessage: string | null;
   trackingSince: string | null;
   endedAt: string | null;
+  stoppedAt: string | null;
   gaps: Gap[];
   serverTime: string;
   present: Participant[];

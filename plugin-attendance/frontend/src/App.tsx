@@ -1,11 +1,12 @@
 import type { CSSProperties } from 'react';
 import { ApiError } from './api';
 import { type LaunchContext, readContext } from './context';
-import { type ParticipantLabel, labelFor } from './participants';
+import { type ParticipantLabel, labelsFor } from './participants';
 import { formatDuration, formatGap, formatTime, plural } from './time';
 import type { CallSnapshot, CallStatus, Participant } from './types';
 import { useNow } from './useNow';
 import { useSnapshot } from './useSnapshot';
+import { ReportDownload } from './ReportDownload';
 
 const context = readContext();
 
@@ -50,6 +51,7 @@ function Attendance({ callId, context }: { callId: string; context: LaunchContex
           !error && <p className="empty">Загрузка…</p>
         )}
       </main>
+      <ReportDownload key={callId} callId={callId} />
       <footer className="foot" title="Идентификатор звонка (SID комнаты) и имя комнаты">
         {callId}
         {context.roomId && ` · ${context.roomId}`}
@@ -76,7 +78,9 @@ function Header({ snapshot }: { snapshot: CallSnapshot | null }) {
         </span>
         <div>
           <h1>Посещаемость</h1>
-          <p>{snapshot?.status === 'ENDED' ? 'звонок завершён' : 'в звонке сейчас'}</p>
+          <p>{snapshot?.status === 'ENDED' ? 'звонок завершён'
+            : snapshot?.status === 'FAILED' || snapshot?.status === 'RECONNECTING'
+              ? 'последний известный состав' : 'в звонке сейчас'}</p>
         </div>
       </div>
       <div className="badges">
@@ -100,8 +104,10 @@ function noticesFor(snapshot: CallSnapshot | null, error: ApiError | null): Noti
   const notices: Notice[] = [];
   if (error) {
     notices.push({
-      tone: 'err',
-      text: snapshot ? `${error.message}. Показаны данные на ${formatTime(snapshot.serverTime)}` : error.message,
+      tone: error.status === 404 ? 'info' : 'err',
+      text: error.status === 404
+        ? 'Текущий состав звонка недоступен. Если история сохранена, её можно скачать в отчёте.'
+        : snapshot ? `${error.message}. Показаны данные на ${formatTime(snapshot.serverTime)}` : error.message,
     });
   }
   if (!snapshot) {
@@ -123,7 +129,7 @@ function noticesFor(snapshot: CallSnapshot | null, error: ApiError | null): Noti
       });
       break;
     case 'FAILED':
-      notices.push({ tone: 'err', text: `Платформа звонков отказала в подписке на события${reason}` });
+      notices.push({ tone: 'err', text: `Отслеживание остановлено${reason}` });
       break;
     case 'ENDED':
       notices.push({
@@ -150,13 +156,16 @@ function noticesFor(snapshot: CallSnapshot | null, error: ApiError | null): Noti
 
 function Lists({ snapshot, now, you }: { snapshot: CallSnapshot; now: number; you: string | null }) {
   const active = snapshot.status === 'TRACKING' || snapshot.status === 'RECONNECTING';
-  const labels = labelsOf([...snapshot.present, ...snapshot.left]);
+  const labels = labelsFor([...snapshot.present, ...snapshot.left].map(participant => participant.participantId));
+  const openGap = snapshot.gaps.find(gap => gap.to === null);
+  const observedUntil = snapshot.stoppedAt ?? openGap?.from;
+  const observedNow = observedUntil ? Math.min(now, Date.parse(observedUntil)) : now;
   const row = (participant: Participant) => (
     <PersonRow
       key={participant.participantId}
       participant={participant}
       label={labels.get(participant.participantId)!}
-      now={now}
+      now={observedNow}
       you={you}
     />
   );
@@ -180,21 +189,6 @@ function Lists({ snapshot, now, you }: { snapshot: CallSnapshot; now: number; yo
         </details>
       )}
     </>
-  );
-}
-
-/** Подписи участников; метку из identity добавляем, только если без неё имена не различить. */
-function labelsOf(participants: Participant[]): Map<string, ParticipantLabel & { showTag: boolean }> {
-  const labels = participants.map((participant) => ({ id: participant.participantId, label: labelFor(participant.participantId) }));
-  const sameName = new Map<string, number>();
-  for (const { label } of labels) {
-    sameName.set(label.name, (sameName.get(label.name) ?? 0) + 1);
-  }
-  return new Map(
-    labels.map(({ id, label }) => [
-      id,
-      { ...label, showTag: label.tag !== null && (label.generic || (sameName.get(label.name) ?? 0) > 1) },
-    ]),
   );
 }
 

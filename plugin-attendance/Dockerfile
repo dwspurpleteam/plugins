@@ -8,6 +8,10 @@ WORKDIR /app
 
 COPY backend/build/libs/plugin-attendance.jar application.jar
 
+RUN mkdir -p /app/data/attendance && chown -R 1000:1000 /app/data
+
+ENV ATTENDANCE_REPORTS_DIRECTORY=/app/data/attendance
+
 USER 1000:1000
 
 EXPOSE 8081

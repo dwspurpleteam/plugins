@@ -17,10 +17,12 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.function.Consumer;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -39,7 +41,6 @@ import ru.itmo.plugins.attendance.service.events.EventSource;
 public final class CallTracker implements EventSource.Listener {
 
     private static final Logger log = LoggerFactory.getLogger(CallTracker.class);
-    private static final int MAX_GAPS = 20;
     private static final int RECENT_EVENT_IDS = 4096;
 
     private final String callId;
@@ -47,6 +48,11 @@ public final class CallTracker implements EventSource.Listener {
     private final Clock clock;
     private final List<String> ignoredPrefixes;
     private final List<String> initialParticipantIds;
+    private final UUID sessionId = UUID.randomUUID();
+    private final UUID activationId;
+    private final Instant activatedAt;
+    private final Consumer<AttendanceReport.Session> persistence;
+    private final List<Visit> history = new ArrayList<>();
 
     private final Map<String, Visit> visits = new HashMap<>();
     private final Set<String> recentEventIds = Collections.newSetFromMap(new LinkedHashMap<>() {
@@ -65,6 +71,7 @@ public final class CallTracker implements EventSource.Listener {
     private Instant finishedAt;
     private EventSource.Subscription subscription;
     private boolean closed;
+    private AttendanceReport.Session lastCheckpoint;
     private final CompletableFuture<Void> ready = new CompletableFuture<>();
 
     public CallTracker(String callId, String source, Clock clock, List<String> ignoredPrefixes) {
@@ -78,11 +85,19 @@ public final class CallTracker implements EventSource.Listener {
             List<String> ignoredPrefixes,
             List<String> initialParticipantIds
     ) {
+        this(callId, source, clock, ignoredPrefixes, initialParticipantIds, null, ignored -> { });
+    }
+
+    CallTracker(String callId, String source, Clock clock, List<String> ignoredPrefixes,
+            List<String> initialParticipantIds, UUID activationId, Consumer<AttendanceReport.Session> persistence) {
         this.callId = callId;
         this.source = source;
         this.clock = clock;
         this.ignoredPrefixes = List.copyOf(ignoredPrefixes);
         this.initialParticipantIds = List.copyOf(initialParticipantIds);
+        this.activationId = activationId;
+        this.activatedAt = clock.instant();
+        this.persistence = persistence;
     }
 
     public String callId() {
@@ -90,41 +105,51 @@ public final class CallTracker implements EventSource.Listener {
     }
 
     @Override
-    public synchronized void onConnected() {
-        if (isFinished()) {
-            return;
-        }
-        Instant now = clock.instant();
-        if (trackingSince == null) {
-            trackingSince = now;
-            for (String participantId : initialParticipantIds) {
-                if (!isIgnored(participantId)) {
-                    // У стартового участника ещё нет события, по которому можно проверять порядок доставки.
-                    visits.putIfAbsent(participantId, new Visit(participantId, now, null, Instant.MIN));
-                }
+    public void onConnected() {
+        synchronized (this) {
+            if (isFinished()) {
+                return;
             }
-            log.debug("Call {} started tracking: knownParticipantCount={}", callId, visits.size());
+            Instant now = clock.instant();
+            if (trackingSince == null) {
+                trackingSince = now;
+                for (String participantId : initialParticipantIds) {
+                    if (!isIgnored(participantId)) {
+                        // У стартового участника ещё нет события, по которому можно проверять порядок доставки.
+                        if (!visits.containsKey(participantId)) {
+                            var visit = new Visit(participantId, now, null, Instant.MIN);
+                            visit.presentAtStart = true;
+                            addVisit(visit);
+                        }
+                    }
+                }
+                log.debug("Call {} started tracking: knownParticipantCount={}", callId, visits.size());
+            }
+            closeGap(now);
+            status = CallStatus.TRACKING;
+            statusMessage = null;
         }
-        closeGap(now);
-        status = CallStatus.TRACKING;
-        statusMessage = null;
+        checkpoint();
         ready.complete(null);
     }
 
     @Override
-    public synchronized void onDisconnected(String reason) {
-        if (isFinished()) {
-            return;
-        }
-        if (trackingSince == null) {
-            status = CallStatus.CONNECTING;
-        } else {
-            status = CallStatus.RECONNECTING;
-            if (gapStartedAt == null) {
-                gapStartedAt = clock.instant();
+    public void onDisconnected(String reason) {
+        synchronized (this) {
+            if (isFinished()) {
+                return;
             }
+            if (trackingSince == null) {
+                status = CallStatus.CONNECTING;
+            } else {
+                status = CallStatus.RECONNECTING;
+                if (gapStartedAt == null) {
+                    gapStartedAt = clock.instant();
+                }
+            }
+            statusMessage = reason;
         }
-        statusMessage = reason;
+        checkpoint();
     }
 
     @Override
@@ -139,37 +164,48 @@ public final class CallTracker implements EventSource.Listener {
             ready.completeExceptionally(new ActivationException(Reason.FAILED, reason));
             finished = finish();
         }
-        closeQuietly(finished);
+        try {
+            checkpoint();
+        } finally {
+            closeQuietly(finished);
+        }
     }
 
     @Override
     public void onEvent(CallEvent event) {
         EventSource.Subscription finished = null;
-        synchronized (this) {
-            if (isFinished() || !callId.equals(event.callId())) {
-                return;
-            }
-            if (!event.id().isEmpty() && !recentEventIds.add(event.id())) {
-                return;
-            }
-            log.debug("Processing attendance event {} for call {} (occurredAt={})",
-                    event.type(), callId, event.occurredAt());
-            switch (event.type()) {
-                case PARTICIPANT_JOINED -> join(event.participantId(), event.occurredAt());
-                case PARTICIPANT_LEFT -> leave(event.participantId(), event.occurredAt());
-                case CALL_ENDED -> {
-                    endedAt = event.occurredAt();
-                    status = CallStatus.ENDED;
-                    ready.completeExceptionally(new ActivationException(Reason.STOPPED, "Call ended during activation"));
-                    statusMessage = null;
-                    // Кто ещё числится в звонке, покинул его вместе с завершением.
-                    visits.values().stream().filter(Visit::present).forEach(visit -> visit.closeAt(endedAt));
-                    finished = finish();
-                    log.info("Call {} ended", callId);
+        try {
+            synchronized (this) {
+                if (isFinished() || !callId.equals(event.callId())) {
+                    return;
+                }
+                if (!event.id().isEmpty() && !recentEventIds.add(event.id())) {
+                    return;
+                }
+                log.debug("Processing attendance event {} for call {} (occurredAt={})",
+                        event.type(), callId, event.occurredAt());
+                switch (event.type()) {
+                    case PARTICIPANT_JOINED -> join(event.participantId(), event.occurredAt());
+                    case PARTICIPANT_LEFT -> leave(event.participantId(), event.occurredAt());
+                    case CALL_ENDED -> {
+                        endedAt = event.occurredAt();
+                        status = CallStatus.ENDED;
+                        ready.completeExceptionally(new ActivationException(Reason.STOPPED, "Call ended during activation"));
+                        statusMessage = null;
+                        // Кто ещё числится в звонке, покинул его вместе с завершением.
+                        visits.values().stream().filter(Visit::present).forEach(visit -> {
+                            visit.closeAt(endedAt);
+                            visit.endReason = "call_ended";
+                        });
+                        finished = finish();
+                        log.info("Call {} ended", callId);
+                    }
                 }
             }
+            checkpoint();
+        } finally {
+            closeQuietly(finished);
         }
-        closeQuietly(finished);
     }
 
     public synchronized CallSnapshot snapshot() {
@@ -188,7 +224,7 @@ public final class CallTracker implements EventSource.Listener {
         if (gapStartedAt != null) {
             gapList.add(new CallSnapshot.Gap(gapStartedAt, null));
         }
-        return new CallSnapshot(callId, source, status, statusMessage, trackingSince, endedAt,
+        return new CallSnapshot(callId, source, status, statusMessage, trackingSince, endedAt, finishedAt,
                 List.copyOf(gapList), clock.instant(), List.copyOf(present), List.copyOf(left));
     }
 
@@ -252,11 +288,21 @@ public final class CallTracker implements EventSource.Listener {
         EventSource.Subscription current;
         synchronized (this) {
             closed = true;
+            if (finishedAt == null) {
+                finishedAt = clock.instant();
+                status = CallStatus.FAILED;
+                statusMessage = "Отслеживание остановлено сервисом";
+                closeGap(finishedAt);
+            }
             ready.completeExceptionally(new ActivationException(Reason.STOPPED, "Activation stopped"));
             current = subscription;
             subscription = null;
         }
-        closeQuietly(current);
+        try {
+            checkpoint();
+        } finally {
+            closeQuietly(current);
+        }
     }
 
     synchronized boolean shouldEvict(Instant now, Duration retention) {
@@ -269,15 +315,15 @@ public final class CallTracker implements EventSource.Listener {
         }
         Visit visit = visits.get(participantId);
         if (visit == null) {
-            visits.put(participantId, new Visit(participantId, at, null, at));
+            addVisit(new Visit(participantId, at, null, at));
             return;
         }
         if (at.isBefore(visit.lastEventAt)) {
             return;
         }
         if (!visit.present()) {
-            visit.joinedAt = at;
-            visit.leftAt = null;
+            visit = new Visit(participantId, at, null, at);
+            addVisit(visit);
         }
         visit.lastEventAt = at;
     }
@@ -289,7 +335,9 @@ public final class CallTracker implements EventSource.Listener {
         Visit visit = visits.get(participantId);
         if (visit == null) {
             // Вошёл до начала отслеживания: время входа неизвестно.
-            visits.put(participantId, new Visit(participantId, null, at, at));
+            var unknownEntry = new Visit(participantId, null, at, at);
+            unknownEntry.endReason = "participant_left";
+            addVisit(unknownEntry);
             return;
         }
         if (at.isBefore(visit.lastEventAt)) {
@@ -297,6 +345,7 @@ public final class CallTracker implements EventSource.Listener {
         }
         if (visit.present()) {
             visit.closeAt(at);
+            visit.endReason = "participant_left";
         }
         visit.lastEventAt = at;
     }
@@ -324,8 +373,54 @@ public final class CallTracker implements EventSource.Listener {
         }
         gaps.addLast(new CallSnapshot.Gap(gapStartedAt, now));
         gapStartedAt = null;
-        while (gaps.size() > MAX_GAPS) {
-            gaps.removeFirst();
+    }
+
+    private void addVisit(Visit visit) {
+        visits.put(visit.participantId, visit);
+        history.add(visit);
+    }
+
+    public synchronized AttendanceReport.Session reportSession() {
+        var allVisits = history.stream().map(visit -> new AttendanceReport.Visit(visit.participantId,
+                visit.joinedAt, visit.leftAt, visit.presentAtStart, visit.endReason)).toList();
+        var allGaps = new ArrayList<>(gaps);
+        if (gapStartedAt != null) {
+            allGaps.add(new CallSnapshot.Gap(gapStartedAt, null));
+        }
+        return new AttendanceReport.Session(sessionId, activationId, activatedAt, trackingSince, endedAt,
+                finishedAt, finishedAt == null ? clock.instant() : finishedAt, status, statusMessage, allVisits, allGaps);
+    }
+
+    /** A durable checkpoint is also taken periodically, so recovery never extends visits across a restart. */
+    void checkpoint() {
+        EventSource.Subscription failed = null;
+        RuntimeException failure = null;
+        synchronized (this) {
+            var snapshot = reportSession();
+            if (snapshot.equals(lastCheckpoint)) {
+                return;
+            }
+            try {
+                persistence.accept(snapshot);
+                lastCheckpoint = snapshot;
+            } catch (RuntimeException exception) {
+                if (finishedAt == null) {
+                    status = CallStatus.FAILED;
+                    statusMessage = "Не удалось сохранить историю посещаемости";
+                    finishedAt = clock.instant();
+                    closeGap(finishedAt);
+                }
+                ready.completeExceptionally(new ActivationException(Reason.FAILED,
+                        "Не удалось сохранить историю посещаемости"));
+                failed = subscription;
+                subscription = null;
+                failure = exception;
+            }
+        }
+        // SDK close can invoke callbacks; never invoke it while holding the tracker monitor.
+        closeQuietly(failed);
+        if (failure != null) {
+            throw failure;
         }
     }
 
@@ -345,6 +440,8 @@ public final class CallTracker implements EventSource.Listener {
         private Instant joinedAt;
         private Instant leftAt;
         private Instant lastEventAt;
+        private boolean presentAtStart;
+        private String endReason;
 
         private Visit(String participantId, Instant joinedAt, Instant leftAt, Instant lastEventAt) {
             this.participantId = participantId;
@@ -359,7 +456,7 @@ public final class CallTracker implements EventSource.Listener {
 
         private void closeAt(Instant at) {
             // Время вебхука округлено до секунд и может оказаться раньше начала учёта.
-            leftAt = at.isBefore(joinedAt) ? joinedAt : at;
+            leftAt = joinedAt != null && at.isBefore(joinedAt) ? joinedAt : at;
         }
     }
 }

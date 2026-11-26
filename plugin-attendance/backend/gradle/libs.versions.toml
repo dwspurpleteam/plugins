@@ -6,6 +6,7 @@ protobuf-plugin = "0.10.0"
 node-plugin = "7.1.0"
 # Node.js, который Gradle скачивает для сборки фронтенда.
 nodejs = "24.22.1"
+pdfbox = "3.0.8"
 
 # Версии gRPC и protobuf задаёт BOM Spring Boot.
 [libraries]
@@ -18,6 +19,7 @@ grpc-netty-shaded = { module = "io.grpc:grpc-netty-shaded" }
 grpc-protobuf = { module = "io.grpc:grpc-protobuf" }
 grpc-stub = { module = "io.grpc:grpc-stub" }
 protobuf-java = { module = "com.google.protobuf:protobuf-java" }
+pdfbox = { module = "org.apache.pdfbox:pdfbox", version.ref = "pdfbox" }
 
 [plugins]
 spring-boot = { id = "org.springframework.boot", version.ref = "spring-boot" }

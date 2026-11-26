@@ -3,14 +3,23 @@ package ru.itmo.plugins.attendance.service.tracking;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static ru.itmo.plugins.attendance.service.support.TestActivations.start;
+import static ru.itmo.plugins.attendance.service.support.TestActivations.command;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.ArrayList;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.junit.jupiter.api.Test;
 
 import ru.itmo.plugins.attendance.configuration.TrackingProperties;
+import ru.itmo.plugins.attendance.service.activation.ActivationCommand;
+import ru.itmo.plugins.attendance.service.activation.ActivationException;
 import ru.itmo.plugins.attendance.service.events.CallEvent;
 import ru.itmo.plugins.attendance.service.events.CallEventType;
 import ru.itmo.plugins.attendance.service.support.MutableClock;
@@ -77,5 +86,49 @@ class CallRegistryTest {
         registry.destroy();
         assertThat(source.subscriptions()).allMatch(RecordedSubscription::closed);
         assertThat(registry.size()).isZero();
+    }
+
+    @Test
+    void failedFinalWriteRemainsRetryableBeforeActivationReplacement() {
+        AtomicBoolean failWrites = new AtomicBoolean();
+        var saved = new ArrayList<AttendanceReport.Session>();
+        var store = mock(AttendanceReportStore.class);
+        doAnswer(invocation -> {
+            if (failWrites.get()) throw new ReportStorageException("disk full");
+            saved.add(invocation.getArgument(1));
+            return null;
+        }).when(store).save(anyString(), any());
+        var durableRegistry = new CallRegistry(source, properties, clock, store);
+        ActivationCommand activation = command("RM_1");
+        CallTracker first = durableRegistry.activate(activation).tracker();
+        first.onConnected();
+        first.onEvent(new CallEvent("join", CallEventType.PARTICIPANT_JOINED, "RM_1", "anna", clock.instant()));
+        clock.advance(Duration.ofSeconds(10));
+        failWrites.set(true);
+
+        assertThatThrownBy(() -> first.onEvent(new CallEvent("leave", CallEventType.PARTICIPANT_LEFT,
+                "RM_1", "anna", clock.instant()))).isInstanceOf(ReportStorageException.class);
+        var terminal = first.reportSession();
+        assertThatThrownBy(() -> durableRegistry.activate(activation)).isInstanceOf(ReportStorageException.class);
+        assertThat(durableRegistry.find("RM_1")).contains(first);
+
+        clock.advance(Duration.ofMinutes(2));
+        durableRegistry.evictStale();
+        assertThat(durableRegistry.find("RM_1")).contains(first);
+        ActivationCommand conflicting = new ActivationCommand(activation.schemaVersion(), activation.activationId(),
+                activation.pluginId(), "changed-version", activation.registryId(), activation.callId(),
+                activation.activationSecret(), activation.initialContext());
+        assertThatThrownBy(() -> durableRegistry.activate(conflicting))
+                .isInstanceOfSatisfying(ActivationException.class, exception ->
+                        assertThat(exception.reason()).isEqualTo(ActivationException.Reason.CONFLICT));
+
+        failWrites.set(false);
+        CallTracker second = durableRegistry.activate(activation).tracker();
+        assertThat(second).isNotSameAs(first);
+        assertThat(durableRegistry.find("RM_1")).contains(second);
+        assertThat(saved.stream().filter(session -> session.sessionId().equals(terminal.sessionId()))
+                .filter(session -> session.status() == CallStatus.FAILED).toList()).containsExactly(terminal);
+        assertThat(source.subscriptions()).hasSize(2);
+        assertThat(source.subscriptions().getFirst().closed()).isTrue();
     }
 }

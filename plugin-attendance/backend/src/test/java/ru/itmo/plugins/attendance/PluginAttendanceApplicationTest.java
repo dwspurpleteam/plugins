@@ -7,21 +7,32 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
+import java.util.List;
+import java.util.UUID;
 import java.util.function.Predicate;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
 import tools.jackson.databind.json.JsonMapper;
 
-import ru.itmo.plugins.attendance.service.tracking.CallSnapshot.Participant;
+import ru.itmo.plugins.attendance.service.tracking.AttendanceReport;
+import ru.itmo.plugins.attendance.service.tracking.AttendanceReportStore;
 import ru.itmo.plugins.attendance.service.tracking.CallSnapshot;
+import ru.itmo.plugins.attendance.service.tracking.CallSnapshot.Participant;
 import ru.itmo.plugins.attendance.service.tracking.CallStatus;
 
 /** Full application tests with a test-only event source. */
@@ -40,6 +51,19 @@ import ru.itmo.plugins.attendance.service.tracking.CallStatus;
 class PluginAttendanceApplicationTest {
 
     private static final String ANNA = "anna-0123456789abcde";
+    private static final Path REPORTS_DIRECTORY = Path.of(System.getProperty("java.io.tmpdir"),
+            "attendance-http-tests-" + UUID.randomUUID());
+
+    @DynamicPropertySource
+    static void reportStorage(DynamicPropertyRegistry properties) {
+        properties.add("attendance.reports.directory", REPORTS_DIRECTORY::toString);
+    }
+
+    @Autowired
+    private AttendanceReportStore reports;
+
+    @Autowired
+    private Clock clock;
 
     private final HttpClient http = HttpClient.newHttpClient();
     private final JsonMapper json = JsonMapper.builder().build();
@@ -131,6 +155,71 @@ class PluginAttendanceApplicationTest {
                 type -> assertThat(type).startsWith("application/json"));
         // Время уходит строкой ISO-8601, а не числом.
         assertThat(response.body()).containsPattern("\"serverTime\":\"\\d{4}-\\d{2}-\\d{2}T");
+    }
+
+    @Test
+    void exportsEveryVisit() throws Exception {
+        String callId = "RM_export_history";
+        activate(callId);
+        for (String type : new String[] { "participant.joined", "participant.left",
+                "participant.joined", "participant.left", "call.ended" }) {
+            assertThat(post("/dev/calls/" + callId + "/events", event(type)).statusCode()).isEqualTo(202);
+        }
+        await("/api/calls/" + callId + "/participants", snapshot -> snapshot.status() == CallStatus.ENDED);
+        assertThat(reports.report(callId).orElseThrow().sessions().getFirst().visits()).hasSize(2);
+
+        HttpResponse<String> csv = get("/api/calls/" + callId
+                + "/report?format=csv&timezone=Europe%2FMoscow", "null");
+        assertThat(csv.statusCode()).isEqualTo(200);
+        assertThat(csv.headers().firstValue("Access-Control-Allow-Origin")).hasValue("*");
+        assertThat(csv.headers().firstValue("Access-Control-Expose-Headers")).hasValue("Content-Disposition");
+        assertThat(csv.headers().firstValue("Content-Type")).hasValueSatisfying(
+                type -> assertThat(type).startsWith("text/csv"));
+        assertThat(csv.headers().firstValue("Content-Disposition")).hasValueSatisfying(
+                value -> assertThat(value).contains("attachment", ".csv"));
+        assertThat(csv.body()).contains("Anna", "Europe/Moscow");
+
+        HttpResponse<byte[]> pdf = http.send(HttpRequest.newBuilder(uri("/api/calls/" + callId
+                + "/report?format=pdf&timezone=UTC")).header("Origin", "null").GET().build(),
+                HttpResponse.BodyHandlers.ofByteArray());
+        assertThat(pdf.statusCode()).isEqualTo(200);
+        assertThat(new String(pdf.body(), 0, 5, java.nio.charset.StandardCharsets.US_ASCII)).isEqualTo("%PDF-");
+    }
+
+    @Test
+    void downloadsArchivedReportWithoutAnInMemoryTracker() throws Exception {
+        String callId = "RM_archived_export";
+        saveArchivedReport(callId);
+        assertThat(get("/api/calls/" + callId + "/participants", "null").statusCode()).isEqualTo(404);
+        HttpResponse<String> response = get("/api/calls/" + callId + "/report?format=csv", "null");
+        assertThat(response.statusCode()).isEqualTo(200);
+        assertThat(response.body()).contains("Anna", "2 мин");
+    }
+
+    @Test
+    void reportsUnreadableArchiveAsServiceUnavailable() throws Exception {
+        String callId = "RM_unreadable_archive";
+        var session = saveArchivedReport(callId);
+        Path archive = REPORTS_DIRECTORY.resolve(session.sessionId() + ".json");
+        byte[] original = Files.readAllBytes(archive);
+        try {
+            Files.writeString(archive, "invalid-json");
+            HttpResponse<String> response = get("/api/calls/" + callId + "/report?format=csv", "null");
+            assertThat(response.statusCode()).isEqualTo(503);
+            assertThat(response.body()).contains("историю посещаемости").doesNotContain(archive.toString());
+        } finally {
+            Files.write(archive, original);
+        }
+    }
+
+    private AttendanceReport.Session saveArchivedReport(String callId) {
+        Instant stoppedAt = clock.instant().minusSeconds(60);
+        Instant startedAt = stoppedAt.minusSeconds(120);
+        var session = new AttendanceReport.Session(UUID.randomUUID(), UUID.randomUUID(), startedAt, startedAt,
+                stoppedAt, stoppedAt, stoppedAt, CallStatus.ENDED, null,
+                List.of(new AttendanceReport.Visit(ANNA, startedAt, stoppedAt, false, "call_ended")), List.of());
+        reports.save(callId, session);
+        return session;
     }
 
     @Test
