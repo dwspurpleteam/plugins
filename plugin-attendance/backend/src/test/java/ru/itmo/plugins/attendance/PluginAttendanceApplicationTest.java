@@ -197,6 +197,42 @@ class PluginAttendanceApplicationTest {
     }
 
     @Test
+    void findsAndDownloadsArchiveWithoutAnActiveCall() throws Exception {
+        String callId = "RM_archive_lookup";
+        saveArchivedReport(callId);
+        HttpResponse<String> response = get("/api/archive?participantId=" + ANNA
+                + "&page=1&limit=100&timezone=Europe%2FMoscow", "null");
+        assertThat(response.statusCode()).isEqualTo(200);
+        assertThat(response.headers().firstValue("Access-Control-Allow-Origin")).hasValue("*");
+        assertThat(response.headers().firstValue("Cache-Control")).hasValueSatisfying(
+                value -> assertThat(value).contains("no-store"));
+        var page = json.readTree(response.body());
+        assertThat(page.path("participantId").asString()).isEqualTo(ANNA);
+        assertThat(page.path("retentionSeconds").asLong()).isEqualTo(Duration.ofDays(30).toSeconds());
+        assertThat(page.path("items").toString()).contains(callId, "reportAvailable", "expiresAt");
+        assertThat(get("/api/calls/" + callId + "/participants", null).statusCode()).isEqualTo(404);
+
+        HttpResponse<String> download = get("/api/archive/calls/" + callId
+                + "/report?participantId=" + ANNA + "&format=csv&timezone=Europe%2FMoscow", "null");
+        assertThat(download.statusCode()).isEqualTo(200);
+        assertThat(download.headers().firstValue("Access-Control-Expose-Headers")).hasValue("Content-Disposition");
+        assertThat(download.body()).contains("Anna", "Europe/Moscow", "2 мин");
+        assertThat(get("/api/archive/calls/" + callId
+                + "/report?participantId=outsider&format=csv", null).statusCode()).isEqualTo(403);
+        assertThat(get("/api/archive?participantId=nonexistent-archive-user", null).body())
+                .contains("\"items\":[]", "\"total\":0");
+    }
+
+    @Test
+    void rejectsInvalidArchiveQueries() throws Exception {
+        for (String query : List.of("", "participantId=%20", "participantId=anna&page=0",
+                "participantId=anna&limit=101", "participantId=anna&timezone=Wrong%2FZone",
+                "participantId=anna&from=2026-02-30", "participantId=anna&from=2026-11-27&to=2026-11-01")) {
+            assertThat(get("/api/archive?" + query, null).statusCode()).as(query).isEqualTo(400);
+        }
+    }
+
+    @Test
     void reportsUnreadableArchiveAsServiceUnavailable() throws Exception {
         String callId = "RM_unreadable_archive";
         var session = saveArchivedReport(callId);

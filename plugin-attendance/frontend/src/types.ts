@@ -28,3 +28,35 @@ export interface Gap {
   /** null: связь ещё не восстановлена. */
   to: string | null;
 }
+
+export interface ArchiveQuery {
+  page?: number;
+  limit?: number;
+  from?: string;
+  to?: string;
+  timezone: string;
+}
+
+export interface ArchiveCall {
+  callId: string;
+  trackingSince: string | null;
+  activatedAt: string;
+  endedAt: string | null;
+  stoppedAt: string | null;
+  status: CallStatus;
+  participantCount: number;
+  hasGaps: boolean;
+  expiresAt: string | null;
+  reportAvailable: boolean;
+}
+
+export interface ArchivePage {
+  participantId: string;
+  serverTime: string;
+  retentionSeconds: number;
+  page: number;
+  limit: number;
+  total: number;
+  totalPages: number;
+  items: ArchiveCall[];
+}

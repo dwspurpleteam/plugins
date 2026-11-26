@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { ApiError, downloadReport, fetchSnapshot } from '../src/api.ts';
+import { ApiError, downloadReport, fetchArchive, fetchSnapshot } from '../src/api.ts';
 
 function rejectOnAbort(signal) {
   return new Promise((_, reject) => {
@@ -111,4 +111,43 @@ test('caller cancellation is not reported as a connection error', async t => {
   const result = assert.rejects(fetchSnapshot('RM_1', controller.signal), { name: 'AbortError' });
   controller.abort();
   await result;
+});
+
+test('archive search encodes the exact subject, date filters and browser timezone', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const page = { participantId: 'Teacher+1', total: 0, items: [] };
+  t.mock.method(globalThis, 'fetch', async (path, init) => {
+    const url = new URL(path, 'https://plugin.example/apps/attendance/');
+    assert.equal(url.pathname, '/apps/attendance/api/archive');
+    assert.deepEqual(Object.fromEntries(url.searchParams), {
+      participantId: 'Teacher+1', timezone: 'Europe/Moscow', page: '2', limit: '10',
+      from: '2026-11-01', to: '2026-11-27',
+    });
+    assert.equal(init.cache, 'no-store');
+    return Response.json(page);
+  });
+  assert.deepEqual(await fetchArchive('Teacher+1', {
+    page: 2, limit: 10, from: '2026-11-01', to: '2026-11-27', timezone: 'Europe/Moscow',
+  }, new AbortController().signal), page);
+});
+
+test('archive download sends the subject to its membership endpoint', async t => {
+  const links = downloads(t);
+  t.mock.method(globalThis, 'fetch', async path => {
+    const url = new URL(path, 'https://plugin.example/');
+    assert.equal(url.pathname, '/api/archive/calls/RM_one/report');
+    assert.equal(url.searchParams.get('participantId'), 'teacher+1');
+    assert.equal(url.searchParams.get('timezone'), 'Asia/Tokyo');
+    return new Response('CSV', { headers: { 'Content-Type': 'text/csv' } });
+  });
+  await downloadReport('RM_one', 'csv', 'Asia/Tokyo', new AbortController().signal, 'teacher+1');
+  assert.equal(links.length, 1);
+});
+
+test('archive download denies an absent participant without saving a file', async t => {
+  const links = downloads(t);
+  t.mock.method(globalThis, 'fetch', async () => new Response('{}', { status: 403 }));
+  await assert.rejects(downloadReport('RM_one', 'pdf', 'UTC', new AbortController().signal, 'outsider'),
+    error => error instanceof ApiError && error.status === 403 && error.message.includes('логин'));
+  assert.equal(links.length, 0);
 });

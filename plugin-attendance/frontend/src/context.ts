@@ -19,3 +19,8 @@ export function readContext(search: string = window.location.search): LaunchCont
     participantId: value('participantId'),
   };
 }
+
+export function initialView(search: string = window.location.search): 'call' | 'archive' {
+  return new URLSearchParams(search).get('view') === 'archive' || !readContext(search).callId
+    ? 'archive' : 'call';
+}

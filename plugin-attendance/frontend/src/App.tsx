@@ -1,30 +1,31 @@
-import type { CSSProperties } from 'react';
+import { type CSSProperties, useState } from 'react';
 import { ApiError } from './api';
-import { type LaunchContext, readContext } from './context';
+import { type LaunchContext, initialView, readContext } from './context';
 import { type ParticipantLabel, labelsFor } from './participants';
 import { formatDuration, formatGap, formatTime, plural } from './time';
 import type { CallSnapshot, CallStatus, Participant } from './types';
 import { useNow } from './useNow';
 import { useSnapshot } from './useSnapshot';
 import { ReportDownload } from './ReportDownload';
+import { Archive } from './Archive';
 
 const context = readContext();
 
 export function App() {
-  if (!context.callId) {
-    return <MissingCallId />;
-  }
-  return <Attendance callId={context.callId} context={context} />;
-}
-
-function MissingCallId() {
+  const [view, setView] = useState(initialView);
+  const [participantId, setParticipantId] = useState(context.participantId);
   return (
-    <div className="app">
-      <div className="center">
-        <h1>Не передан звонок</h1>
-        <p>
-          Откройте плагин из звонка или укажите идентификатор активированного звонка в адресе: <code>?callId=RM_…</code>.
-        </p>
+    <div className="plugin-shell">
+      <nav className="plugin-nav" aria-label="Посещаемость">
+        {context.callId && (
+          <button type="button" aria-pressed={view === 'call'} onClick={() => setView('call')}>Звонок</button>
+        )}
+        <button type="button" aria-pressed={view === 'archive'} onClick={() => setView('archive')}>Архив</button>
+      </nav>
+      <div className="plugin-content">
+        {view === 'call' && context.callId
+          ? <Attendance callId={context.callId} context={context} />
+          : <Archive initialParticipantId={participantId} onParticipantIdChange={setParticipantId} />}
       </div>
     </div>
   );

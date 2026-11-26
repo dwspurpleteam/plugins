@@ -1,4 +1,4 @@
-import type { CallSnapshot } from './types';
+import type { ArchivePage, ArchiveQuery, CallSnapshot } from './types';
 
 export class ApiError extends Error {
   /** HTTP-статус; 0, если сервер плагина недоступен. */
@@ -22,12 +22,27 @@ export async function fetchSnapshot(callId: string, signal: AbortSignal): Promis
 
 export type ReportFormat = 'pdf' | 'csv';
 
+export async function fetchArchive(participantId: string, query: ArchiveQuery, signal: AbortSignal): Promise<ArchivePage> {
+  const params = new URLSearchParams({ participantId, timezone: query.timezone });
+  if (query.page !== undefined) params.set('page', String(query.page));
+  if (query.limit !== undefined) params.set('limit', String(query.limit));
+  if (query.from) params.set('from', query.from);
+  if (query.to) params.set('to', query.to);
+  return request(`api/archive?${params}`, signal,
+    response => response.json() as Promise<ArchivePage>);
+}
+
 /** Отчёт читается отдельно от текущего состава: архив доступен и после завершения трекера. */
-export async function downloadReport(callId: string, format: ReportFormat, timezone: string, signal: AbortSignal): Promise<void> {
+export async function downloadReport(callId: string, format: ReportFormat, timezone: string, signal: AbortSignal,
+  participantId?: string): Promise<void> {
   const query = new URLSearchParams({ format, timezone });
+  const path = participantId !== undefined
+    ? `api/archive/calls/${encodeURIComponent(callId)}/report`
+    : `api/calls/${encodeURIComponent(callId)}/report`;
+  if (participantId !== undefined) query.set('participantId', participantId);
   let report: { file: Blob; filename: string };
   try {
-    report = await request(`api/calls/${encodeURIComponent(callId)}/report?${query}`, signal, async (response) => {
+    report = await request(`${path}?${query}`, signal, async (response) => {
       const expectedType = format === 'pdf' ? 'application/pdf' : 'text/csv';
       if (response.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase() !== expectedType) {
         throw new ApiError('Сервер вернул неподдерживаемый формат отчёта', 502);
@@ -39,6 +54,9 @@ export async function downloadReport(callId: string, format: ReportFormat, timez
       return { file, filename };
     }, 30_000);
   } catch (error) {
+    if (error instanceof ApiError && error.status === 403) {
+      throw new ApiError('Этот логин не найден среди участников звонка.', 403);
+    }
     if (error instanceof ApiError && error.status === 404) {
       throw new ApiError('Для этого звонка нет сохранённого отчёта. Возможно, срок хранения истёк.', 404);
     }

@@ -13,11 +13,14 @@ import java.nio.file.StandardOpenOption;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
+import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -30,8 +33,8 @@ import tools.jackson.databind.json.JsonMapper;
 import ru.itmo.plugins.attendance.configuration.ReportStorageProperties;
 
 /**
- * One atomically replaced JSON file per tracking attempt. The in-memory index contains only IDs
- * and retention timestamps. A file lock prevents two processes from recovering each other's live sessions.
+ * One atomically replaced JSON file per tracking attempt. The in-memory index keeps summaries and
+ * participant membership, but never attendance intervals. A file lock protects live sessions.
  */
 @Component
 public class AttendanceReportStore implements AutoCloseable, DisposableBean {
@@ -42,6 +45,7 @@ public class AttendanceReportStore implements AutoCloseable, DisposableBean {
     private final Clock clock;
     private final JsonMapper json = JsonMapper.builder().build();
     private final Map<String, Map<UUID, Entry>> calls = new HashMap<>();
+    private final Map<String, Set<String>> participantCalls = new HashMap<>();
     private final Map<String, Set<UUID>> failedWrites = new HashMap<>();
     private FileChannel ownershipChannel;
     private FileLock ownershipLock;
@@ -111,9 +115,11 @@ public class AttendanceReportStore implements AutoCloseable, DisposableBean {
     public synchronized void save(String callId, AttendanceReport.Session session) {
         requireOpen();
         UUID id = session.sessionId();
+        boolean valid = false;
         try {
             Stored stored = new Stored(SCHEMA_VERSION, callId, session);
             validate(stored);
+            valid = true;
             writeAtomically(id, json.writeValueAsBytes(stored));
             index(callId, session);
             Set<UUID> failures = failedWrites.get(callId);
@@ -121,6 +127,8 @@ public class AttendanceReportStore implements AutoCloseable, DisposableBean {
                 failedWrites.remove(callId);
             }
         } catch (IOException | RuntimeException exception) {
+            // Keep failed attempts discoverable, but never offer an incomplete report for download.
+            if (valid) index(callId, session);
             failedWrites.computeIfAbsent(callId, ignored -> new HashSet<>()).add(id);
             throw new ReportStorageException("Cannot save attendance history for call " + callId, exception);
         }
@@ -143,22 +151,88 @@ public class AttendanceReportStore implements AutoCloseable, DisposableBean {
     }
 
     private void index(String callId, AttendanceReport.Session session) {
-        calls.computeIfAbsent(callId, ignored -> new HashMap<>())
-                .put(session.sessionId(), new Entry(session.sessionId(), session.stoppedAt()));
+        Map<UUID, Entry> entries = calls.computeIfAbsent(callId, ignored -> new HashMap<>());
+        Set<String> previous = participants(entries.values());
+        Set<String> participants = new HashSet<>();
+        session.visits().forEach(visit -> participants.add(visit.participantId()));
+        entries.put(session.sessionId(), new Entry(session.sessionId(), session.activatedAt(),
+                session.trackingSince(), session.endedAt(), session.stoppedAt(), session.status(),
+                Set.copyOf(participants), !session.gaps().isEmpty()));
+        updateMembership(callId, previous, entries.values());
+    }
+
+    private static Set<String> participants(Iterable<Entry> entries) {
+        Set<String> result = new HashSet<>();
+        entries.forEach(entry -> result.addAll(entry.participants()));
+        return result;
+    }
+
+    private void updateMembership(String callId, Set<String> previous, Iterable<Entry> entries) {
+        Set<String> current = participants(entries);
+        for (String participant : previous) {
+            if (!current.contains(participant)) {
+                Set<String> membership = participantCalls.get(participant);
+                if (membership != null) {
+                    membership.remove(callId);
+                    if (membership.isEmpty()) participantCalls.remove(participant);
+                }
+            }
+        }
+        current.forEach(participant -> participantCalls.computeIfAbsent(participant, ignored -> new HashSet<>()).add(callId));
+    }
+
+    /** Uses only this participant's index and lightweight summaries, never report files. */
+    public synchronized AttendanceArchive archive(String participantId, int page, int limit,
+            LocalDate from, LocalDate to, ZoneId zone) {
+        requireOpen();
+        if (page < 1 || limit < 1 || limit > 100) throw new IllegalArgumentException("Invalid archive pagination");
+        Instant now = clock.instant();
+        var items = new ArrayList<AttendanceArchive.Item>();
+        for (String callId : participantCalls.getOrDefault(participantId, Set.of())) {
+            List<Entry> retained = calls.get(callId).values().stream().filter(entry -> !expired(entry, now)).toList();
+            if (retained.stream().noneMatch(entry -> entry.participants().contains(participantId))) continue;
+            var item = summarize(callId, retained);
+            LocalDate date = item.startedAt().atZone(zone).toLocalDate();
+            if ((from == null || !date.isBefore(from)) && (to == null || !date.isAfter(to))) items.add(item);
+        }
+        items.sort(Comparator.comparing(AttendanceArchive.Item::startedAt).reversed()
+                .thenComparing(AttendanceArchive.Item::callId));
+        int total = items.size();
+        int start = (int) Math.min((long) (page - 1) * limit, total);
+        int end = (int) Math.min((long) start + limit, total);
+        return new AttendanceArchive(participantId, now, properties.retention().toSeconds(), page, limit,
+                total, (int) ((total + (long) limit - 1) / limit), items.subList(start, end));
+    }
+
+    private AttendanceArchive.Item summarize(String callId, List<Entry> entries) {
+        Entry latest = entries.stream().max(Comparator.comparing(Entry::activatedAt)
+                .thenComparing(Entry::sessionId)).orElseThrow();
+        Instant activatedAt = entries.stream().map(Entry::activatedAt).min(Comparator.naturalOrder()).orElseThrow();
+        Instant trackingSince = entries.stream().map(Entry::trackingSince).filter(java.util.Objects::nonNull)
+                .min(Comparator.naturalOrder()).orElse(null);
+        boolean stopped = entries.stream().allMatch(entry -> entry.stoppedAt() != null);
+        Instant stoppedAt = stopped ? entries.stream().map(Entry::stoppedAt).max(Comparator.naturalOrder()).orElseThrow() : null;
+        Instant endedAt = latest.endedAt();
+        Instant expiresAt = stoppedAt != null && !properties.retention().isZero()
+                ? stoppedAt.plus(properties.retention()) : null;
+        boolean available = entries.stream().noneMatch(entry -> failedWrites.getOrDefault(callId, Set.of()).contains(entry.sessionId()));
+        return new AttendanceArchive.Item(callId, trackingSince, activatedAt, endedAt, stoppedAt, latest.status(),
+                participants(entries).size(), entries.stream().anyMatch(Entry::hasGaps), expiresAt, available);
     }
 
     /** Reads durable snapshots of this call only; it never acquires live tracker locks. */
     public synchronized Optional<AttendanceReport> report(String callId) {
         requireOpen();
-        if (failedWrites.containsKey(callId)) {
-            throw new ReportStorageException("Attendance history could not be saved for call " + callId);
-        }
         Map<UUID, Entry> entries = calls.get(callId);
         if (entries == null) {
             return Optional.empty();
         }
         var sessions = new ArrayList<AttendanceReport.Session>();
         Instant now = clock.instant();
+        if (entries.values().stream().anyMatch(entry -> !expired(entry, now)
+                && failedWrites.getOrDefault(callId, Set.of()).contains(entry.sessionId()))) {
+            throw new ReportStorageException("Attendance history could not be saved for call " + callId);
+        }
         try {
             for (Entry entry : entries.values()) {
                 if (!expired(entry, now)) {
@@ -182,14 +256,21 @@ public class AttendanceReportStore implements AutoCloseable, DisposableBean {
         Instant now = clock.instant();
         try {
             for (var callIterator = calls.entrySet().iterator(); callIterator.hasNext();) {
-                Map<UUID, Entry> entries = callIterator.next().getValue();
+                var call = callIterator.next();
+                Map<UUID, Entry> entries = call.getValue();
+                Set<String> previous = participants(entries.values());
                 for (var iterator = entries.values().iterator(); iterator.hasNext();) {
                     Entry entry = iterator.next();
                     if (expired(entry, now)) {
                         Files.deleteIfExists(file(entry.sessionId()));
                         iterator.remove();
+                        Set<UUID> failures = failedWrites.get(call.getKey());
+                        if (failures != null && failures.remove(entry.sessionId()) && failures.isEmpty()) {
+                            failedWrites.remove(call.getKey());
+                        }
                     }
                 }
+                updateMembership(call.getKey(), previous, entries.values());
                 if (entries.isEmpty()) {
                     callIterator.remove();
                 }
@@ -278,6 +359,7 @@ public class AttendanceReportStore implements AutoCloseable, DisposableBean {
         close();
     }
 
-    private record Entry(UUID sessionId, Instant stoppedAt) { }
+    private record Entry(UUID sessionId, Instant activatedAt, Instant trackingSince, Instant endedAt,
+            Instant stoppedAt, CallStatus status, Set<String> participants, boolean hasGaps) { }
     private record Stored(int schemaVersion, String callId, AttendanceReport.Session session) { }
 }
