@@ -4,7 +4,7 @@
 
 Форма выгрузки отчёта находится внизу окна, под списком участников. Выберите `PDF` или `CSV (Excel)` и нажмите «Скачать». Отчёт содержит минималистичную таблицу: одна строка на участника, все периоды присутствия рядом и общая длительность в часах, минутах и секундах. В шапке указаны начало отслеживания, время формирования и часовой пояс браузера. Технические идентификаторы сеансов и состояния подписки в отчёт не выводятся. Выгрузка доступна и после удаления трекера из памяти: достаточно открыть страницу с тем же `callId`.
 
-Backend — один Gradle-модуль на Java 25 и Spring Boot. React/TypeScript-интерфейс собирается вместе с backend и раздаётся из одного исполняемого JAR. Текущая версия плагина — `1.0.1`, зависимость Java SDK — `pluginsdk:plugin-sdk:1.1.0`.
+Backend — один Gradle-модуль на Java 25 и Spring Boot. React/TypeScript-интерфейс собирается вместе с backend и раздаётся из одного исполняемого JAR. Текущая версия плагина — `1.0.2`, зависимость Java SDK — `pluginsdk:plugin-sdk:1.1.0`.
 
 ## Архив посещаемости
 
@@ -119,7 +119,7 @@ npm run dev
 
 ### Через серверный Plugin Manager
 
-Для серверного экземпляра сначала зарегистрируйте [манифест версии 1.0.1](manifests/plugin-attendance-1.0.1-manifest-1.1.json) в Plugin Registry и разверните соответствующую сборку плагина.
+Для серверного экземпляра сначала разверните сборку плагина `1.0.2` и зарегистрируйте [манифест версии 1.0.2](manifests/plugin-attendance-1.0.2-manifest-1.1.json) в Plugin Registry. Манифест использует серверные адреса `https://calls.vareonix.cc/apps/plugin-attendance/` и запрашивает начальный состав через `initial-state: ["participants"]`.
 
 Создайте звонок, получите его `callId` и отправьте запрос (пример для Bash):
 
@@ -129,7 +129,7 @@ curl --fail-with-body --request POST 'https://calls.vareonix.cc/v1/activations' 
   --data '{
     "callId": "RM_REAL_CALL_ID",
     "pluginId": "attendance",
-    "pluginVersion": "1.0.1",
+    "pluginVersion": "1.0.2",
     "pluginRegistryId": "local",
     "requestedBy": "manual",
     "idempotencyKey": "REPLACE_WITH_UNIQUE_KEY"
@@ -227,10 +227,13 @@ CSV использует UTF-8 с BOM и разделитель `;`; значе�
 
 | Версия плагина | Манифест |
 |---|---|
-| `1.0.1` | [plugin-attendance-1.0.1-manifest-1.1.json](manifests/plugin-attendance-1.0.1-manifest-1.1.json) — текущий выпуск |
+| `1.0.2` | [plugin-attendance-1.0.2-manifest-1.1.json](manifests/plugin-attendance-1.0.2-manifest-1.1.json) — текущий выпуск |
+| `1.0.1` | [plugin-attendance-1.0.1-manifest-1.1.json](manifests/plugin-attendance-1.0.1-manifest-1.1.json) — предыдущий выпуск |
 | `0.1.0` | [plugin-attendance-0.1.0-manifest-1.1.json](manifests/plugin-attendance-0.1.0-manifest-1.1.json) — историческая версия |
 
 Содержимое существующих манифестов неизменяемо. Для новой версии создаётся отдельный файл и отдельная запись версии в Plugin Registry.
+
+Версия `1.0.2` включает долговременную историю посещений, минималистичные отчёты PDF/CSV и архив звонков с поиском по логину. Файлы отчётов формируются при скачивании; на диске хранится история в JSON. Существующие файлы истории совместимы с новой версией, миграция не требуется. Перед обновлением сохраните постоянный volume с историей.
 
 [Dockerfile](Dockerfile) упаковывает готовый `backend/build/libs/plugin-attendance.jar`. Для ручной сборки сначала выполните Gradle `build` в `backend`, затем `make image-build` в `plugin-attendance` (нужны Docker и Make). Профиль выбирается при запуске контейнера.
 

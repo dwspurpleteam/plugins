@@ -10,7 +10,7 @@ curl --noproxy '*' --request POST 'http://127.0.0.1:18081/control' \
     "activationId":"UUID_FROM_PLUGIN_MANAGER",
     "activationSecret":"SECRET_FROM_PLUGIN_MANAGER",
     "pluginId":"attendance",
-    "pluginVersion":"1.0.1",
+    "pluginVersion":"1.0.2",
     "registryId":"local",
     "callId":"RM_REAL_CALL_ID",
     "initialContext":null
