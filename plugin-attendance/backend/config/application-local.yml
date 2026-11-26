@@ -4,6 +4,8 @@ server:
   port: 18081
 
 attendance:
+  activation:
+    start-timeout: 2500ms
   streamapi:
     target: calls.vareonix.cc:443
     plaintext: false

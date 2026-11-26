@@ -81,6 +81,32 @@ class PluginAttendanceApplicationTest {
     }
 
     @Test
+    void returnsInitialParticipantsAsSoonAsActivationCompletes() throws Exception {
+        String body = """
+                {"schemaVersion":"1.0","activationId":"%s","pluginId":"attendance",
+                 "pluginVersion":"1.0.1","registryId":"local","activationSecret":"test-secret",
+                 "callId":"RM_initial","initialContext":{"callId":"RM_initial","participants":[
+                   {"participantIdentity":"%s","joinDate":1000},
+                   {"participantIdentity":"boris","joinDate":2000}
+                 ],"snapshot":{"capturedAt":"2026-11-26T10:00:00Z","source":"call-backend","consistency":"partial"}}}
+                """.formatted(java.util.UUID.randomUUID(), ANNA);
+        assertThat(post("/control", body).statusCode()).isEqualTo(200);
+
+        String path = "/api/calls/RM_initial/participants";
+        HttpResponse<String> response = get(path, "null");
+        assertThat(response.statusCode()).isEqualTo(200);
+        CallSnapshot started = json.readValue(response.body(), CallSnapshot.class);
+        assertThat(started.status()).isEqualTo(CallStatus.TRACKING);
+        assertThat(started.present()).extracting(Participant::participantId).containsExactly(ANNA, "boris");
+        assertThat(started.present()).extracting(Participant::joinedAt).containsOnly(started.trackingSince());
+
+        assertThat(post("/dev/calls/RM_initial/events", event("participant.left")).statusCode()).isEqualTo(202);
+        CallSnapshot left = await(path, snapshot -> !snapshot.left().isEmpty());
+        assertThat(left.present()).extracting(Participant::participantId).containsExactly("boris");
+        assertThat(left.left()).extracting(Participant::participantId).containsExactly(ANNA);
+    }
+
+    @Test
     void logsHttpRequestsWithoutCredentialsOrQueryParameters(CapturedOutput output) throws Exception {
         assertThat(get("/actuator/health", null).statusCode()).isEqualTo(200);
         activate("RM_logging");

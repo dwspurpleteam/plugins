@@ -41,6 +41,52 @@ class CallTrackerTest {
     }
 
     @Test
+    void initializesParticipantsOnceAtTrackingStart() {
+        var seeded = new CallTracker(CALL, "test", clock, List.of("streamapi-"),
+                List.of("anna", "anna", "boris", "streamapi-helper", " "));
+        assertThat(seeded.snapshot().present()).isEmpty();
+
+        clock.advance(Duration.ofSeconds(2));
+        seeded.onConnected();
+        assertThat(seeded.snapshot().present()).containsExactly(
+                new Participant("anna", at(2), null), new Participant("boris", at(2), null));
+
+        seeded.onEvent(event(PARTICIPANT_LEFT, "anna", 3));
+        seeded.onDisconnected("temporary outage");
+        clock.advance(Duration.ofSeconds(5));
+        seeded.onConnected();
+
+        assertThat(seeded.snapshot().trackingSince()).isEqualTo(at(2));
+        assertThat(seeded.snapshot().present()).containsExactly(new Participant("boris", at(2), null));
+        assertThat(seeded.snapshot().left()).containsExactly(new Participant("anna", at(2), at(3)));
+    }
+
+    @Test
+    void preservesEventsReceivedBeforeInitialConnection() {
+        var seeded = new CallTracker(CALL, "test", clock, List.of(), List.of("anna"));
+        seeded.onEvent(event(PARTICIPANT_LEFT, "anna", 1));
+
+        clock.advance(Duration.ofSeconds(2));
+        seeded.onConnected();
+
+        assertThat(seeded.snapshot().present()).isEmpty();
+        assertThat(seeded.snapshot().left()).containsExactly(new Participant("anna", null, at(1)));
+    }
+
+    @Test
+    void roundedCallEndCannotProduceNegativeInitialVisitDuration() {
+        clock.advance(Duration.ofMillis(500));
+        var seeded = new CallTracker(CALL, "test", clock, List.of(), List.of("anna"));
+        seeded.onConnected();
+
+        seeded.onEvent(event(CALL_ENDED, "", 0));
+
+        assertThat(seeded.snapshot().status()).isEqualTo(CallStatus.ENDED);
+        assertThat(seeded.snapshot().left()).containsExactly(
+                new Participant("anna", clock.instant(), clock.instant()));
+    }
+
+    @Test
     void participantStaysPresentUntilLeft() {
         tracker.onEvent(event(PARTICIPANT_JOINED, "anna", 10));
         assertThat(tracker.snapshot().present()).containsExactly(new Participant("anna", at(10), null));

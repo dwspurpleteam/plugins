@@ -83,8 +83,10 @@ public class CallRegistry implements DisposableBean {
         if (trackers.size() >= properties.maxCalls()) {
             throw new TooManyCallsException(properties.maxCalls());
         }
+        var initialParticipantIds = command.initialParticipantIds();
         log.debug("Creating tracker for activation {} and call {}", command.activationId(), command.callId());
-        var tracker = new CallTracker(command.callId(), source.name(), clock, properties.ignoredParticipantPrefixes());
+        var tracker = new CallTracker(command.callId(), source.name(), clock,
+                properties.ignoredParticipantPrefixes(), initialParticipantIds);
         var activation = new Activation(command, tracker);
         activations.put(command.activationId(), activation);
         trackers.put(command.callId(), tracker);

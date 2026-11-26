@@ -48,7 +48,8 @@ class ControlController {
                 command.activationId(), callId, command.pluginVersion(), startTimeout.toMillis());
         try {
             var activation = registry.activate(command);
-            var snapshot = activation.tracker().awaitConnected(startTimeout);
+            Duration remaining = startTimeout.minusNanos(System.nanoTime() - startedAt);
+            var snapshot = activation.tracker().awaitConnected(remaining.isNegative() ? Duration.ZERO : remaining);
             log.info("Activation {} for call {} ready after {} ms", command.activationId(), callId,
                     Duration.ofNanos(System.nanoTime() - startedAt).toMillis());
             return new ControlResponse(command.activationId(), callId, snapshot.status());
