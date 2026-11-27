@@ -12,12 +12,12 @@ import org.springframework.context.annotation.Configuration;
 class ProfilesTest {
     @ParameterizedTest
     @CsvSource({
-        "prod, nginx:19090, true, 0.0.0.0, 8081",
-        "stage, nginx-stage:19090, true, 0.0.0.0, 8081",
-        "local, calls.vareonix.cc:443, false, 127.0.0.1, 18081"
+        "prod, nginx:19090, true, 0.0.0.0, 8081, 4s",
+        "stage, nginx-stage:19090, true, 0.0.0.0, 8081, 4s",
+        "local, calls.vareonix.cc:443, false, 127.0.0.1, 18081, 2500ms"
     })
     void loadsCommonAndEnvironmentSettings(String profile, String target, boolean plaintext,
-            String address, int port) {
+            String address, int port, String activationTimeout) {
         new ApplicationContextRunner()
                 .withInitializer(new ConfigDataApplicationContextInitializer())
                 .withUserConfiguration(ProfileProperties.class)
@@ -32,6 +32,8 @@ class ProfilesTest {
                     var environment = context.getEnvironment();
                     assertThat(environment.getProperty("server.address")).isEqualTo(address);
                     assertThat(environment.getProperty("server.port", Integer.class)).isEqualTo(port);
+                    assertThat(environment.getProperty("attendance.activation.start-timeout"))
+                            .isEqualTo(activationTimeout);
                 });
     }
 

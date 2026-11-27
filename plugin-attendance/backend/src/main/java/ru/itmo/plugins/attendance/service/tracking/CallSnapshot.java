@@ -6,7 +6,7 @@ import java.util.List;
 /**
  * Состав звонка на момент запроса; ответ {@code GET /api/calls/{callId}/participants}.
  *
- * @param trackingSince с какого момента учитываются входы; {@code null}, пока подписка не установилась
+ * @param trackingSince начало учёта присутствия; {@code null}, пока подписка не установилась
  * @param gaps          перерывы связи с источником, последний может быть ещё открыт
  * @param serverTime    время сервера, по нему клиент считает длительность без учёта своих часов
  * @param present       кто сейчас в звонке, по времени входа
@@ -25,7 +25,7 @@ public record CallSnapshot(
         List<Participant> left) {
 
     /**
-     * @param joinedAt {@code null}: участник вошёл до начала отслеживания
+     * @param joinedAt начало учтённого визита; {@code null}, если известно только время выхода
      * @param leftAt   {@code null}: участник сейчас в звонке
      */
     public record Participant(String participantId, Instant joinedAt, Instant leftAt) {

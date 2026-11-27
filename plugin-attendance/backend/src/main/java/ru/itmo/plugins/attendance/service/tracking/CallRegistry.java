@@ -65,8 +65,10 @@ public class CallRegistry implements DisposableBean {
             }
             // A manager retry can restart a failed launch after its resources have been closed.
             if (previous.tracker().status() != CallStatus.FAILED) {
+                log.debug("Activation {} for call {} already has a tracker", command.activationId(), command.callId());
                 return previous;
             }
+            log.debug("Restarting failed activation {} for call {}", command.activationId(), command.callId());
             trackers.remove(command.callId(), previous.tracker());
             previous.tracker().close();
         }
@@ -81,13 +83,18 @@ public class CallRegistry implements DisposableBean {
         if (trackers.size() >= properties.maxCalls()) {
             throw new TooManyCallsException(properties.maxCalls());
         }
-        var tracker = new CallTracker(command.callId(), source.name(), clock, properties.ignoredParticipantPrefixes());
+        var initialParticipantIds = command.initialParticipantIds();
+        log.debug("Creating tracker for activation {} and call {}", command.activationId(), command.callId());
+        var tracker = new CallTracker(command.callId(), source.name(), clock,
+                properties.ignoredParticipantPrefixes(), initialParticipantIds);
         var activation = new Activation(command, tracker);
         activations.put(command.activationId(), activation);
         trackers.put(command.callId(), tracker);
         try {
             tracker.attach(source.subscribe(command.callId(), command.credentials(), tracker));
         } catch (RuntimeException exception) {
+            log.debug("Could not start event subscription for activation {} and call {} ({})",
+                    command.activationId(), command.callId(), exception.getClass().getSimpleName());
             tracker.onFailed("Could not start event subscription");
             throw new ActivationException(Reason.FAILED, "Could not start event subscription");
         }

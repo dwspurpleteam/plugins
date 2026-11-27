@@ -165,8 +165,7 @@ function Lists({ snapshot, now, you }: { snapshot: CallSnapshot; now: number; yo
     <>
       {snapshot.trackingSince && (
         <p className="hint">
-          {snapshot.status === 'ENDED' ? 'Учитывались' : 'Учитываются'} входы с {formatTime(snapshot.trackingSince)}:
-          кто был в звонке раньше, {snapshot.status === 'ENDED' ? 'не попал в список' : 'появится после повторного входа'}.
+          Учёт присутствия начался в {formatTime(snapshot.trackingSince)}.
         </p>
       )}
       {snapshot.present.length > 0 ? (

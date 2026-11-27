@@ -31,7 +31,9 @@ import ru.itmo.plugins.attendance.service.tracking.CallRegistry;
 
 class ControlControllerTest {
     private final ControlledSource source = new ControlledSource();
-    private final CallRegistry registry = new CallRegistry(source, new TrackingProperties(10, Duration.ofMinutes(1), Duration.ofSeconds(30), List.of()), Clock.systemUTC());
+    private final CallRegistry registry = new CallRegistry(source,
+            new TrackingProperties(10, Duration.ofMinutes(1), Duration.ofSeconds(30), List.of("streamapi-")),
+            Clock.systemUTC());
     private final UUID activationId = UUID.randomUUID();
 
     @AfterEach
@@ -45,12 +47,16 @@ class ControlControllerTest {
     }
 
     private String body(UUID id, String call) {
+        return body(id, call, "null");
+    }
+
+    private String body(UUID id, String call, String initialContext) {
         return """
                 {"schemaVersion":"1.0","activationId":"%s","pluginId":"attendance",
                  "pluginVersion":"0.1.0","registryId":"local","callId":"%s",
                  "activationSecret":"private-secret",
-                 "initialContext":{"participants":[{"participantIdentity":"not-seeded"}]}}
-                """.formatted(id, call);
+                 "initialContext":%s}
+                """.formatted(id, call, initialContext);
     }
 
     private Callable<MvcResult> request(MockMvc mvc, String body) {
@@ -60,7 +66,14 @@ class ControlControllerTest {
     @Test
     void waitsForConnectionAndDeduplicatesConcurrentDeliveries() throws Exception {
         var mvc = mvc(Duration.ofSeconds(4));
-        String body = body(activationId, "RM_1");
+        String body = body(activationId, "RM_1", """
+                {"callId":"RM_1","participants":[
+                  {"participantIdentity":"anna","joinDate":1000},
+                  {"participantIdentity":"anna"},
+                  {"participantIdentity":"streamapi-helper"},
+                  {"participantIdentity":" "},
+                  {"participantIdentity":123}]}
+                """);
         try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
             var first = executor.submit(request(mvc, body));
             var subscription = source.next();
@@ -75,7 +88,22 @@ class ControlControllerTest {
             assertThat(source.subscribed.get()).isEqualTo(1);
             assertThat(subscription.credentials().activationId()).isEqualTo(activationId);
             assertThat(subscription.credentials().secret()).isEqualTo("private-secret");
-            assertThat(registry.find("RM_1").orElseThrow().snapshot().present()).isEmpty();
+            var tracker = registry.find("RM_1").orElseThrow();
+            var started = tracker.snapshot();
+            assertThat(started.present()).hasSize(1);
+            assertThat(started.present().getFirst().participantId()).isEqualTo("anna");
+            assertThat(started.present().getFirst().joinedAt()).isEqualTo(started.trackingSince());
+
+            var listener = subscription.listener();
+            listener.onEvent(new CallEvent("leave", CallEventType.PARTICIPANT_LEFT,
+                    "RM_1", "anna", started.trackingSince().minusMillis(100)));
+            listener.onDisconnected("temporary outage");
+            listener.onConnected();
+            assertThat(request(mvc, body).call().getResponse().getStatus()).isEqualTo(200);
+            assertThat(source.subscribed.get()).isEqualTo(1);
+            var afterReconnect = tracker.snapshot();
+            assertThat(afterReconnect.present()).isEmpty();
+            assertThat(afterReconnect.left().getFirst().leftAt()).isEqualTo(started.trackingSince());
             assertThat(request(mvc, body(activationId, "RM_changed")).call().getResponse().getStatus()).isEqualTo(409);
             assertThat(request(mvc, body.replace("private-secret", "changed")).call().getResponse().getStatus())
                     .isEqualTo(409);

@@ -31,10 +31,9 @@ import ru.itmo.plugins.attendance.service.events.CallEvent;
 import ru.itmo.plugins.attendance.service.events.EventSource;
 
 /**
- * Состав одного звонка, собранный из событий источника.
+ * Состав одного звонка, собранный из начального снимка и событий источника.
  *
- * <p>Видит только тех, кто вошёл после начала отслеживания: streamapi не отдаёт историю и текущий
- * состав. Порядок доставки не гарантирован, поэтому событие участника старше уже применённого
+ * <p>Порядок доставки не гарантирован, поэтому событие участника старше уже применённого
  * отбрасывается; повторы отсеиваются по идентификатору события.
  */
 public final class CallTracker implements EventSource.Listener {
@@ -47,6 +46,7 @@ public final class CallTracker implements EventSource.Listener {
     private final String source;
     private final Clock clock;
     private final List<String> ignoredPrefixes;
+    private final List<String> initialParticipantIds;
 
     private final Map<String, Visit> visits = new HashMap<>();
     private final Set<String> recentEventIds = Collections.newSetFromMap(new LinkedHashMap<>() {
@@ -68,10 +68,21 @@ public final class CallTracker implements EventSource.Listener {
     private final CompletableFuture<Void> ready = new CompletableFuture<>();
 
     public CallTracker(String callId, String source, Clock clock, List<String> ignoredPrefixes) {
+        this(callId, source, clock, ignoredPrefixes, List.of());
+    }
+
+    CallTracker(
+            String callId,
+            String source,
+            Clock clock,
+            List<String> ignoredPrefixes,
+            List<String> initialParticipantIds
+    ) {
         this.callId = callId;
         this.source = source;
         this.clock = clock;
         this.ignoredPrefixes = List.copyOf(ignoredPrefixes);
+        this.initialParticipantIds = List.copyOf(initialParticipantIds);
     }
 
     public String callId() {
@@ -86,6 +97,13 @@ public final class CallTracker implements EventSource.Listener {
         Instant now = clock.instant();
         if (trackingSince == null) {
             trackingSince = now;
+            for (String participantId : initialParticipantIds) {
+                if (!isIgnored(participantId)) {
+                    // У стартового участника ещё нет события, по которому можно проверять порядок доставки.
+                    visits.putIfAbsent(participantId, new Visit(participantId, now, null, Instant.MIN));
+                }
+            }
+            log.debug("Call {} started tracking: knownParticipantCount={}", callId, visits.size());
         }
         closeGap(now);
         status = CallStatus.TRACKING;
@@ -134,6 +152,8 @@ public final class CallTracker implements EventSource.Listener {
             if (!event.id().isEmpty() && !recentEventIds.add(event.id())) {
                 return;
             }
+            log.debug("Processing attendance event {} for call {} (occurredAt={})",
+                    event.type(), callId, event.occurredAt());
             switch (event.type()) {
                 case PARTICIPANT_JOINED -> join(event.participantId(), event.occurredAt());
                 case PARTICIPANT_LEFT -> leave(event.participantId(), event.occurredAt());
@@ -143,7 +163,7 @@ public final class CallTracker implements EventSource.Listener {
                     ready.completeExceptionally(new ActivationException(Reason.STOPPED, "Call ended during activation"));
                     statusMessage = null;
                     // Кто ещё числится в звонке, покинул его вместе с завершением.
-                    visits.values().stream().filter(Visit::present).forEach(visit -> visit.leftAt = endedAt);
+                    visits.values().stream().filter(Visit::present).forEach(visit -> visit.closeAt(endedAt));
                     finished = finish();
                     log.info("Call {} ended", callId);
                 }
@@ -276,7 +296,7 @@ public final class CallTracker implements EventSource.Listener {
             return;
         }
         if (visit.present()) {
-            visit.leftAt = at;
+            visit.closeAt(at);
         }
         visit.lastEventAt = at;
     }
@@ -335,6 +355,11 @@ public final class CallTracker implements EventSource.Listener {
 
         private boolean present() {
             return leftAt == null;
+        }
+
+        private void closeAt(Instant at) {
+            // Время вебхука округлено до секунд и может оказаться раньше начала учёта.
+            leftAt = at.isBefore(joinedAt) ? joinedAt : at;
         }
     }
 }
