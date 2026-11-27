@@ -31,6 +31,7 @@ import org.springframework.stereotype.Component;
 import tools.jackson.databind.json.JsonMapper;
 
 import ru.itmo.plugins.attendance.configuration.ReportStorageProperties;
+import ru.itmo.plugins.attendance.service.activation.DeactivationReceipt;
 
 /**
  * One atomically replaced JSON file per tracking attempt. The in-memory index keeps summaries and
@@ -47,6 +48,7 @@ public class AttendanceReportStore implements AutoCloseable, DisposableBean {
     private final Map<String, Map<UUID, Entry>> calls = new HashMap<>();
     private final Map<String, Set<String>> participantCalls = new HashMap<>();
     private final Map<String, Set<UUID>> failedWrites = new HashMap<>();
+    private final Map<UUID, DeactivationReceipt> deactivations = new HashMap<>();
     private FileChannel ownershipChannel;
     private FileLock ownershipLock;
     private Path ownedDirectory;
@@ -58,6 +60,7 @@ public class AttendanceReportStore implements AutoCloseable, DisposableBean {
         try {
             Files.createDirectories(properties.directory());
             acquireOwnership();
+            loadDeactivations();
             loadArchive();
             cleanup();
             Path probe = Files.createTempFile(properties.directory(), ".write-check-", ".tmp");
@@ -134,8 +137,54 @@ public class AttendanceReportStore implements AutoCloseable, DisposableBean {
         }
     }
 
+    /** Deactivation fences are independent of report retention, including stops received before startup. */
+    private void loadDeactivations() throws IOException {
+        Path directory = properties.directory().resolve("deactivations");
+        Files.createDirectories(directory);
+        try (var paths = Files.list(directory)) {
+            for (Path path : paths.filter(p -> p.getFileName().toString().endsWith(".json")).toList()) {
+                if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
+                    throw new IOException("Deactivation receipt must be a regular file");
+                }
+                var receipt = json.readValue(Files.readAllBytes(path), DeactivationReceipt.class);
+                if (receipt == null || receipt.activationId() == null || receipt.callId() == null
+                        || receipt.callId().isBlank() || receipt.credentialHash() == null
+                        || !receipt.credentialHash().matches("[0-9a-f]{64}")
+                        || !path.getFileName().toString().equals(receipt.activationId() + ".json")) {
+                    throw new IOException("Invalid deactivation receipt");
+                }
+                deactivations.put(receipt.activationId(), receipt);
+            }
+        }
+    }
+
+    public synchronized Optional<DeactivationReceipt> deactivation(UUID activationId) {
+        requireOpen();
+        return Optional.ofNullable(deactivations.get(activationId));
+    }
+
+    public synchronized void saveDeactivation(DeactivationReceipt receipt) {
+        requireOpen();
+        var previous = deactivations.get(receipt.activationId());
+        if (previous != null) {
+            if (!previous.equals(receipt)) throw new ReportStorageException("Conflicting deactivation receipt");
+            return;
+        }
+        try {
+            writeAtomically(properties.directory().resolve("deactivations").resolve(receipt.activationId() + ".json"),
+                    json.writeValueAsBytes(receipt));
+            deactivations.put(receipt.activationId(), receipt);
+        } catch (IOException | RuntimeException exception) {
+            throw new ReportStorageException("Cannot save deactivation receipt", exception);
+        }
+    }
+
     private void writeAtomically(UUID id, byte[] data) throws IOException {
-        Path temporary = Files.createTempFile(properties.directory(), id + "-", ".tmp");
+        writeAtomically(file(id), data);
+    }
+
+    private void writeAtomically(Path destination, byte[] data) throws IOException {
+        Path temporary = Files.createTempFile(destination.getParent(), destination.getFileName() + "-", ".tmp");
         try {
             try (FileChannel channel = FileChannel.open(temporary, StandardOpenOption.WRITE)) {
                 ByteBuffer buffer = ByteBuffer.wrap(data);
@@ -144,7 +193,7 @@ public class AttendanceReportStore implements AutoCloseable, DisposableBean {
                 }
                 channel.force(true);
             }
-            Files.move(temporary, file(id), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            Files.move(temporary, destination, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
         } finally {
             Files.deleteIfExists(temporary);
         }

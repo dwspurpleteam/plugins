@@ -18,6 +18,8 @@ import ru.itmo.plugins.attendance.configuration.TrackingProperties;
 import ru.itmo.plugins.attendance.service.activation.ActivationCommand;
 import ru.itmo.plugins.attendance.service.activation.ActivationException.Reason;
 import ru.itmo.plugins.attendance.service.activation.ActivationException;
+import ru.itmo.plugins.attendance.service.activation.DeactivationCommand;
+import ru.itmo.plugins.attendance.service.activation.DeactivationReceipt;
 import ru.itmo.plugins.attendance.service.events.EventSource;
 
 /**
@@ -35,6 +37,7 @@ public class CallRegistry implements DisposableBean {
     private final AttendanceReportStore reports;
     private final ConcurrentMap<String, CallTracker> trackers = new ConcurrentHashMap<>();
     private final ConcurrentMap<UUID, Activation> activations = new ConcurrentHashMap<>();
+    private final ConcurrentMap<UUID, DeactivationReceipt> deactivations = new ConcurrentHashMap<>();
 
     public CallRegistry(EventSource source, TrackingProperties properties, Clock clock) {
         this(source, properties, clock, null);
@@ -66,6 +69,9 @@ public class CallRegistry implements DisposableBean {
 
     /** Registration is serialized, but waiting for the connection must happen outside this lock. */
     public synchronized Activation activate(ActivationCommand command) {
+        if (deactivation(command.activationId()).isPresent()) {
+            throw new ActivationException(Reason.STOPPED, "Activation has been deactivated; use a new activationId");
+        }
         Activation previous = activations.get(command.activationId());
         if (previous != null) {
             if (!previous.command().equals(command)) {
@@ -82,10 +88,12 @@ public class CallRegistry implements DisposableBean {
         }
         CallTracker existing = trackers.get(command.callId());
         if (existing != null) {
-            if (existing.status() != CallStatus.FAILED && existing.status() != CallStatus.ENDED) {
+            if (existing.status() != CallStatus.FAILED && existing.status() != CallStatus.ENDED
+                    && existing.status() != CallStatus.STOPPED) {
                 throw new ActivationException(Reason.CONFLICT, "Call already has an attendance activation");
             }
-            existing.close();
+            if (existing.status() == CallStatus.STOPPED) existing.stop();
+            else existing.close();
             trackers.remove(command.callId(), existing);
         }
         if (trackers.size() >= properties.maxCalls()) {
@@ -115,6 +123,33 @@ public class CallRegistry implements DisposableBean {
         return activation;
     }
 
+    /** Serializes start/stop ownership changes; acknowledgement requires both durable writes and closure. */
+    public synchronized void deactivate(DeactivationCommand command) {
+        var receipt = DeactivationReceipt.from(command);
+        var previous = deactivation(command.activationId());
+        if (previous.isPresent() && !previous.get().equals(receipt)) {
+            throw new ActivationException(Reason.CONFLICT, "Deactivation parameters do not match the original request");
+        }
+        Activation activation = activations.get(command.activationId());
+        if (activation != null && (!activation.command().callId().equals(command.callId())
+                || !receipt.matches(activation.command().callId(), activation.command().activationSecret()))) {
+            throw new ActivationException(Reason.CONFLICT, "Deactivation does not match activation credentials");
+        }
+        // Fence immediately in memory even if a full disk prevents persistence. Manager will retry.
+        deactivations.put(command.activationId(), receipt);
+        try {
+            if (reports != null) reports.saveDeactivation(receipt);
+        } finally {
+            if (activation != null) activation.tracker().stop();
+        }
+    }
+
+    private Optional<DeactivationReceipt> deactivation(UUID activationId) {
+        var receipt = deactivations.get(activationId);
+        if (receipt != null) return Optional.of(receipt);
+        return reports == null ? Optional.empty() : reports.deactivation(activationId);
+    }
+
     @Scheduled(
             initialDelayString = "${attendance.tracking.cleanup-interval}",
             fixedDelayString = "${attendance.tracking.cleanup-interval}")
@@ -124,7 +159,8 @@ public class CallRegistry implements DisposableBean {
             try {
                 tracker.checkpoint();
                 if (tracker.shouldEvict(now, properties.failedRetention())) {
-                    tracker.close();
+                    if (tracker.status() == CallStatus.STOPPED) tracker.stop();
+                    else tracker.close();
                     trackers.remove(callId, tracker);
                     log.info("Stopped tracking call {} ({})", callId, tracker.status());
                 }

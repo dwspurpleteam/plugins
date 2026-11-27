@@ -308,7 +308,44 @@ public final class CallTracker implements EventSource.Listener {
         }
     }
 
+    /** Stops observation without inventing participant departures or a call end. Retryable on failure. */
+    void stop() {
+        EventSource.Subscription current;
+        synchronized (this) {
+            closed = true;
+            if (finishedAt == null) {
+                finishedAt = clock.instant();
+                status = CallStatus.STOPPED;
+                statusMessage = null;
+                closeGap(finishedAt);
+            }
+            ready.completeExceptionally(new ActivationException(Reason.STOPPED, "Activation deactivated"));
+            current = subscription;
+        }
+        ActivationException closeFailure = null;
+        if (current != null) {
+            try {
+                current.close();
+                synchronized (this) {
+                    if (subscription == current) subscription = null;
+                }
+            } catch (RuntimeException exception) {
+                closeFailure = new ActivationException(Reason.FAILED, "Could not close the event subscription");
+                closeFailure.initCause(exception);
+            }
+        }
+        // Resource closure must not prevent preserving the final observation on disk.
+        try {
+            checkpoint();
+        } catch (ReportStorageException exception) {
+            if (closeFailure != null) exception.addSuppressed(closeFailure);
+            throw exception;
+        }
+        if (closeFailure != null) throw closeFailure;
+    }
+
     synchronized boolean shouldEvict(Instant now, Duration retention) {
+        if (closed && subscription != null) return false;
         return closed || (finishedAt != null && Duration.between(finishedAt, now).compareTo(retention) > 0);
     }
 

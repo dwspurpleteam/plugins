@@ -51,7 +51,7 @@ export function useSnapshot(callId: string): SnapshotState {
         }
         failures = 0;
         setState({ callId, snapshot, error: null, clockOffsetMs: Date.parse(snapshot.serverTime) - Date.now() });
-        nextDelay = snapshot.status === 'ENDED' || snapshot.status === 'FAILED' ? ENDED_POLL_MS : POLL_MS;
+        nextDelay = ['ENDED', 'FAILED', 'STOPPED'].includes(snapshot.status) ? ENDED_POLL_MS : POLL_MS;
       } catch (error) {
         if (disposed) return;
         if (current.signal.aborted) {

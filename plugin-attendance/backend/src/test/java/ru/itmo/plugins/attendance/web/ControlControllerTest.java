@@ -166,6 +166,53 @@ class ControlControllerTest {
     }
 
     @Test
+    void deactivatesWhileStartupIsWaitingAndRejectsDelayedActivation() throws Exception {
+        var mvc = mvc(Duration.ofSeconds(4));
+        String activation = body(activationId, "RM_1");
+        String deactivation = """
+                {"schemaVersion":"1.0","operation":"deactivate","activationId":"%s",
+                 "callId":"RM_1","pluginId":"attendance","requestedBy":"moderator",
+                 "activationSecret":"private-secret"}
+                """.formatted(activationId);
+        try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            var starting = executor.submit(request(mvc, activation));
+            var subscription = source.next();
+            var response = request(mvc, deactivation).call().getResponse();
+            assertThat(response.getStatus()).isEqualTo(200);
+            assertThat(response.getContentAsString()).contains("STOPPED").doesNotContain("private-secret");
+            assertThat(starting.get(5, TimeUnit.SECONDS).getResponse().getStatus()).isEqualTo(503);
+            assertThat(source.closed.get()).isEqualTo(1);
+            subscription.listener().onConnected();
+            assertThat(registry.find("RM_1").orElseThrow().snapshot().status().name()).isEqualTo("STOPPED");
+            assertThat(request(mvc, deactivation).call().getResponse().getStatus()).isEqualTo(200);
+            assertThat(request(mvc, activation).call().getResponse().getStatus()).isEqualTo(503);
+            assertThat(source.subscribed.get()).isEqualTo(1);
+        }
+    }
+
+    @Test
+    void rejectsInvalidDeactivationAndUnknownOperationsWithoutStartingAnything() throws Exception {
+        var mvc = mvc(Duration.ofSeconds(1));
+        String valid = """
+                {"schemaVersion":"1.0","operation":"deactivate","activationId":"%s",
+                 "callId":"RM_1","pluginId":"attendance","requestedBy":"moderator",
+                 "activationSecret":"private-secret"}
+                """.formatted(activationId);
+        for (String invalid : List.of(valid.replace("\"1.0\"", "\"9.0\""),
+                valid.replace("deactivate", "delete"), valid.replace("attendance", "other-plugin"),
+                valid.replace("private-secret", ""), valid.replace("moderator", " "),
+                valid.replace(activationId.toString(), "bad-uuid"), valid.replace("RM_1", " RM_1 "),
+                body(activationId, "RM_1").replace("\"schemaVersion\"", "\"operation\":\"delete\",\"schemaVersion\""))) {
+            assertThat(request(mvc, invalid).call().getResponse().getStatus()).isEqualTo(400);
+        }
+        assertThat(source.subscribed.get()).isZero();
+        // A stop received before activation has no launch-only fields and is still valid.
+        assertThat(request(mvc, valid).call().getResponse().getStatus()).isEqualTo(200);
+        assertThat(request(mvc, body(activationId, "RM_1")).call().getResponse().getStatus()).isEqualTo(503);
+        assertThat(source.subscribed.get()).isZero();
+    }
+
+    @Test
     void rejectsInvalidContractBeforeSubscribing() throws Exception {
         var mvc = mvc(Duration.ofSeconds(1));
         String valid = body(activationId, "RM_1");
