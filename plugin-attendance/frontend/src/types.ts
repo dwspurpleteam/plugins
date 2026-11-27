@@ -4,6 +4,7 @@ export interface CallSnapshot {
   source: string;
   status: CallStatus;
   statusMessage: string | null;
+  persistencePending: boolean;
   trackingSince: string | null;
   endedAt: string | null;
   stoppedAt: string | null;

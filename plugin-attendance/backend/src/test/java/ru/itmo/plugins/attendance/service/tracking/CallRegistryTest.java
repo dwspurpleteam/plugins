@@ -106,8 +106,7 @@ class CallRegistryTest {
         clock.advance(Duration.ofSeconds(10));
         failWrites.set(true);
 
-        assertThatThrownBy(() -> first.onEvent(new CallEvent("leave", CallEventType.PARTICIPANT_LEFT,
-                "RM_1", "anna", clock.instant()))).isInstanceOf(ReportStorageException.class);
+        first.onFailed("source failed");
         var terminal = first.reportSession();
         assertThatThrownBy(() -> durableRegistry.activate(activation)).isInstanceOf(ReportStorageException.class);
         assertThat(durableRegistry.find("RM_1")).contains(first);
@@ -130,5 +129,60 @@ class CallRegistryTest {
                 .filter(session -> session.status() == CallStatus.FAILED).toList()).containsExactly(terminal);
         assertThat(source.subscriptions()).hasSize(2);
         assertThat(source.subscriptions().getFirst().closed()).isTrue();
+    }
+
+    @Test
+    void pendingEndedCallsStayWithinTrackerLimitAndAreEvictedOnlyAfterSuccessfulRetry() {
+        AtomicBoolean failWrites = new AtomicBoolean();
+        var saved = new ArrayList<AttendanceReport.Session>();
+        var store = mock(AttendanceReportStore.class);
+        doAnswer(invocation -> {
+            if (failWrites.get()) throw new ReportStorageException("disk full");
+            saved.add(invocation.getArgument(1));
+            return null;
+        }).when(store).save(anyString(), any());
+        var durableRegistry = new CallRegistry(source, properties, clock, store);
+        var first = durableRegistry.activate(command("RM_1")).tracker();
+        var second = durableRegistry.activate(command("RM_2")).tracker();
+        first.onConnected();
+        second.onConnected();
+        failWrites.set(true);
+        first.onEvent(new CallEvent("end1", CallEventType.CALL_ENDED, "RM_1", "", clock.instant()));
+        second.onEvent(new CallEvent("end2", CallEventType.CALL_ENDED, "RM_2", "", clock.instant()));
+        var terminal = first.reportSession();
+        clock.advance(Duration.ofMinutes(2));
+        durableRegistry.evictStale();
+        assertThat(durableRegistry.size()).isEqualTo(2);
+        assertThat(first.snapshot().persistencePending()).isTrue();
+        assertThat(first.snapshot().status()).isEqualTo(CallStatus.ENDED);
+        assertThat(source.subscriptions()).allMatch(RecordedSubscription::closed);
+        assertThatThrownBy(() -> durableRegistry.activate(command("RM_3")))
+                .isInstanceOf(TooManyCallsException.class);
+
+        failWrites.set(false);
+        durableRegistry.evictStale();
+        assertThat(durableRegistry.size()).isZero();
+        assertThat(saved).contains(terminal);
+        assertThat(first.snapshot().persistencePending()).isFalse();
+        assertThat(first.reportSession()).isEqualTo(terminal);
+    }
+
+    @Test
+    void initialWriteFailureDoesNotStartSubscriptionAndActivationCanBeRetried() {
+        AtomicBoolean failWrites = new AtomicBoolean(true);
+        var store = mock(AttendanceReportStore.class);
+        doAnswer(invocation -> {
+            if (failWrites.get()) throw new ReportStorageException("disk full");
+            return null;
+        }).when(store).save(anyString(), any());
+        var durableRegistry = new CallRegistry(source, properties, clock, store);
+        var activation = command("RM_1");
+        assertThatThrownBy(() -> durableRegistry.activate(activation)).isInstanceOf(ReportStorageException.class);
+        assertThat(durableRegistry.size()).isZero();
+        assertThat(source.subscriptions()).isEmpty();
+        failWrites.set(false);
+        durableRegistry.activate(activation);
+        assertThat(durableRegistry.size()).isEqualTo(1);
+        assertThat(source.subscriptions()).hasSize(1);
     }
 }

@@ -114,6 +114,9 @@ function noticesFor(snapshot: CallSnapshot | null, error: ApiError | null): Noti
   if (!snapshot) {
     return notices;
   }
+  if (snapshot.persistencePending) {
+    notices.push({ tone: 'warn', text: 'История временно не сохраняется. Данные хранятся в памяти; повторяем запись.' });
+  }
   const reason = snapshot.statusMessage ? ` (${snapshot.statusMessage})` : '';
   switch (snapshot.status) {
     case 'CONNECTING':

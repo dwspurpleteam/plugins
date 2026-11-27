@@ -168,7 +168,7 @@ class CallTrackerTest {
     }
 
     @Test
-    void persistenceFailureAlwaysClosesSubscriptionOutsideTrackerLock() {
+    void persistenceFailureDoesNotCloseLiveSubscriptionAndTerminalCallbacksStillCloseOutsideLock() {
         List<Consumer<CallTracker>> actions = List.of(
                 candidate -> candidate.onEvent(event(PARTICIPANT_JOINED, "anna", 10)),
                 candidate -> candidate.onEvent(event(CALL_ENDED, "", 10)),
@@ -192,11 +192,16 @@ class CallTrackerTest {
             clock.advance(Duration.ofSeconds(1));
             failWrites.set(true);
 
-            org.assertj.core.api.Assertions.assertThatThrownBy(() -> action.accept(candidate))
-                    .isInstanceOf(ReportStorageException.class);
-            assertThat(subscriptionClosed).isTrue();
-            assertThat(candidate.snapshot().status()).isEqualTo(
-                    candidate.snapshot().endedAt() == null ? CallStatus.FAILED : CallStatus.ENDED);
+            if (action == actions.getLast()) {
+                org.assertj.core.api.Assertions.assertThatThrownBy(() -> action.accept(candidate))
+                        .isInstanceOf(ReportStorageException.class);
+            } else {
+                action.accept(candidate);
+            }
+            var snapshot = candidate.snapshot();
+            assertThat(snapshot.persistencePending()).isTrue();
+            assertThat(subscriptionClosed.get()).isEqualTo(snapshot.stoppedAt() != null);
+            if (snapshot.stoppedAt() == null) assertThat(snapshot.status()).isNotEqualTo(CallStatus.FAILED);
         }
     }
 
@@ -211,8 +216,7 @@ class CallTrackerTest {
         candidate.onConnected();
         clock.advance(Duration.ofSeconds(10));
         fail.set(true);
-        org.assertj.core.api.Assertions.assertThatThrownBy(() -> candidate.onEvent(event(CALL_ENDED, "", 10)))
-                .isInstanceOf(ReportStorageException.class);
+        candidate.onEvent(event(CALL_ENDED, "", 10));
         var ended = candidate.reportSession();
         assertThat(ended.status()).isEqualTo(CallStatus.ENDED);
         assertThat(ended.capturedAt()).isEqualTo(at(10));
@@ -221,11 +225,62 @@ class CallTrackerTest {
         fail.set(false);
         candidate.checkpoint();
         assertThat(saved.getLast()).isEqualTo(ended);
+        assertThat(candidate.snapshot().persistencePending()).isFalse();
         int writes = saved.size();
         clock.advance(Duration.ofMinutes(5));
         candidate.checkpoint();
         candidate.close();
         assertThat(saved).hasSize(writes);
+    }
+
+    @Test
+    void keepsEveryVisitDuringOutageAndRetriesWithLatestHistoryWithoutRestartingSubscription() {
+        var saved = new ArrayList<AttendanceReport.Session>();
+        AtomicBoolean fail = new AtomicBoolean();
+        AtomicBoolean closed = new AtomicBoolean();
+        int[] attempts = { 0 };
+        var candidate = new CallTracker(CALL, "test", clock, List.of(), List.of(), null, session -> {
+            attempts[0]++;
+            if (fail.get()) throw new ReportStorageException("disk full");
+            saved.add(session);
+        });
+        candidate.onConnected();
+        candidate.attach(() -> closed.set(true));
+        fail.set(true);
+        candidate.onEvent(event(PARTICIPANT_JOINED, "anna", 0));
+        int failedAttempts = attempts[0];
+        clock.advance(Duration.ofSeconds(1));
+        candidate.onEvent(event(PARTICIPANT_LEFT, "anna", 1));
+        candidate.onEvent(event(PARTICIPANT_JOINED, "boris", 1));
+        assertThat(attempts[0]).isEqualTo(failedAttempts);
+        assertThat(candidate.snapshot().status()).isEqualTo(CallStatus.TRACKING);
+        assertThat(candidate.snapshot().persistencePending()).isTrue();
+        assertThat(candidate.snapshot().stoppedAt()).isNull();
+        assertThat(closed).isFalse();
+
+        clock.advance(Duration.ofSeconds(4));
+        fail.set(false);
+        candidate.onEvent(event(PARTICIPANT_JOINED, "anna", 5));
+        assertThat(candidate.snapshot().persistencePending()).isFalse();
+        assertThat(saved.getLast().visits()).hasSize(3);
+        assertThat(saved.getLast().visits().getFirst().leftAt()).isEqualTo(at(1));
+        assertThat(saved.getLast().visits()).extracting(AttendanceReport.Visit::participantId)
+                .containsExactly("anna", "boris", "anna");
+        assertThat(closed).isFalse();
+    }
+
+    @Test
+    void connectedCallbackStillCompletesReadinessWhenStorageIsTemporarilyUnavailable() {
+        AtomicBoolean fail = new AtomicBoolean(true);
+        var candidate = new CallTracker(CALL, "test", clock, List.of(), List.of(), null, session -> {
+            if (fail.get()) throw new ReportStorageException("disk full");
+        });
+        candidate.onConnected();
+        assertThat(candidate.awaitConnected(Duration.ofMillis(1)).status()).isEqualTo(CallStatus.TRACKING);
+        assertThat(candidate.snapshot().persistencePending()).isTrue();
+        fail.set(false);
+        candidate.checkpoint();
+        assertThat(candidate.snapshot().persistencePending()).isFalse();
     }
 
     @Test

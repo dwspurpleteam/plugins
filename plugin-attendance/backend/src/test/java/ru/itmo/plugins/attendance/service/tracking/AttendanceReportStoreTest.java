@@ -145,7 +145,7 @@ class AttendanceReportStoreTest {
     }
 
     @Test
-    void storageFailureStopsTrackingAndPreventsSuccessfulIncompleteReport() throws Exception {
+    void storageFailureKeepsTrackingButBlocksStaleReportUntilHistoryIsSaved() throws Exception {
         Path storage = directory.resolve("storage");
         var store = store(storage, Duration.ofDays(30));
         var tracker = tracker(store);
@@ -155,14 +155,22 @@ class AttendanceReportStoreTest {
         Files.createDirectory(file);
         Files.writeString(file.resolve("blocker"), "cannot replace a nonempty directory with a file");
 
-        assertThatThrownBy(() -> tracker.onEvent(event("join", PARTICIPANT_JOINED, "anna")))
-                .isInstanceOf(ReportStorageException.class);
-        assertThat(tracker.snapshot().status()).isEqualTo(CallStatus.FAILED);
+        tracker.onEvent(event("join", PARTICIPANT_JOINED, "anna"));
+        assertThat(tracker.snapshot().status()).isEqualTo(CallStatus.TRACKING);
+        assertThat(tracker.snapshot().persistencePending()).isTrue();
         assertThatThrownBy(() -> store.report("RM_history")).isInstanceOf(ReportStorageException.class);
-        Instant failedAt = tracker.reportSession().stoppedAt();
         clock.advance(Duration.ofMinutes(1));
+        tracker.onEvent(event("leave", PARTICIPANT_LEFT, "anna"));
         assertThatThrownBy(tracker::checkpoint).isInstanceOf(ReportStorageException.class);
-        assertThat(tracker.reportSession().stoppedAt()).isEqualTo(failedAt);
+        assertThat(tracker.reportSession().stoppedAt()).isNull();
+        Files.delete(file.resolve("blocker"));
+        Files.delete(file);
+        tracker.checkpoint();
+        assertThat(tracker.snapshot().persistencePending()).isFalse();
+        var saved = store.report("RM_history").orElseThrow().sessions().getFirst();
+        assertThat(saved.visits()).hasSize(1);
+        assertThat(saved.visits().getFirst().leftAt()).isEqualTo(clock.instant());
+        assertThat(saved.status()).isEqualTo(CallStatus.TRACKING);
     }
 
     @Test

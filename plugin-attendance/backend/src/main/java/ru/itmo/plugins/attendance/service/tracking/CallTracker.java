@@ -42,6 +42,7 @@ public final class CallTracker implements EventSource.Listener {
 
     private static final Logger log = LoggerFactory.getLogger(CallTracker.class);
     private static final int RECENT_EVENT_IDS = 4096;
+    private static final Duration CHECKPOINT_RETRY_DELAY = Duration.ofSeconds(5);
 
     private final String callId;
     private final String source;
@@ -72,6 +73,8 @@ public final class CallTracker implements EventSource.Listener {
     private EventSource.Subscription subscription;
     private boolean closed;
     private AttendanceReport.Session lastCheckpoint;
+    private boolean persistencePending;
+    private Instant retryCheckpointAt;
     private final CompletableFuture<Void> ready = new CompletableFuture<>();
 
     public CallTracker(String callId, String source, Clock clock, List<String> ignoredPrefixes) {
@@ -129,7 +132,7 @@ public final class CallTracker implements EventSource.Listener {
             status = CallStatus.TRACKING;
             statusMessage = null;
         }
-        checkpoint();
+        checkpointFromCallback();
         ready.complete(null);
     }
 
@@ -149,7 +152,7 @@ public final class CallTracker implements EventSource.Listener {
             }
             statusMessage = reason;
         }
-        checkpoint();
+        checkpointFromCallback();
     }
 
     @Override
@@ -165,7 +168,7 @@ public final class CallTracker implements EventSource.Listener {
             finished = finish();
         }
         try {
-            checkpoint();
+            checkpointFromCallback();
         } finally {
             closeQuietly(finished);
         }
@@ -202,7 +205,7 @@ public final class CallTracker implements EventSource.Listener {
                     }
                 }
             }
-            checkpoint();
+            checkpointFromCallback();
         } finally {
             closeQuietly(finished);
         }
@@ -225,7 +228,7 @@ public final class CallTracker implements EventSource.Listener {
             gapList.add(new CallSnapshot.Gap(gapStartedAt, null));
         }
         return new CallSnapshot(callId, source, status, statusMessage, trackingSince, endedAt, finishedAt,
-                List.copyOf(gapList), clock.instant(), List.copyOf(present), List.copyOf(left));
+                List.copyOf(gapList), clock.instant(), List.copyOf(present), List.copyOf(left), persistencePending);
     }
 
     public CallSnapshot awaitConnected(Duration timeout) {
@@ -392,35 +395,31 @@ public final class CallTracker implements EventSource.Listener {
     }
 
     /** A durable checkpoint is also taken periodically, so recovery never extends visits across a restart. */
-    void checkpoint() {
-        EventSource.Subscription failed = null;
-        RuntimeException failure = null;
-        synchronized (this) {
-            var snapshot = reportSession();
-            if (snapshot.equals(lastCheckpoint)) {
-                return;
-            }
-            try {
-                persistence.accept(snapshot);
-                lastCheckpoint = snapshot;
-            } catch (RuntimeException exception) {
-                if (finishedAt == null) {
-                    status = CallStatus.FAILED;
-                    statusMessage = "Не удалось сохранить историю посещаемости";
-                    finishedAt = clock.instant();
-                    closeGap(finishedAt);
-                }
-                ready.completeExceptionally(new ActivationException(Reason.FAILED,
-                        "Не удалось сохранить историю посещаемости"));
-                failed = subscription;
-                subscription = null;
-                failure = exception;
-            }
+    synchronized void checkpoint() {
+        var snapshot = reportSession();
+        if (snapshot.equals(lastCheckpoint)) {
+            return;
         }
-        // SDK close can invoke callbacks; never invoke it while holding the tracker monitor.
-        closeQuietly(failed);
-        if (failure != null) {
-            throw failure;
+        try {
+            persistence.accept(snapshot);
+            lastCheckpoint = snapshot;
+            persistencePending = false;
+            retryCheckpointAt = null;
+        } catch (ReportStorageException exception) {
+            persistencePending = true;
+            retryCheckpointAt = clock.instant().plus(CHECKPOINT_RETRY_DELAY);
+            throw exception;
+        }
+    }
+
+    /** Storage outages must not interrupt SDK callbacks or turn them into source failures. */
+    private synchronized void checkpointFromCallback() {
+        // Coalesce live updates during an outage; always try the final snapshot immediately.
+        if (!isFinished() && retryCheckpointAt != null && clock.instant().isBefore(retryCheckpointAt)) return;
+        try {
+            checkpoint();
+        } catch (ReportStorageException exception) {
+            log.warn("Cannot save attendance history for call {}; retaining it in memory for retry", callId, exception);
         }
     }
 

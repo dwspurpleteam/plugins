@@ -12,6 +12,7 @@ import java.util.List;
  * @param serverTime    время сервера, по нему клиент считает длительность без учёта своих часов
  * @param present       кто сейчас в звонке, по времени входа
  * @param left          кто покинул звонок, сначала последние
+ * @param persistencePending последняя запись истории не удалась; актуальные данные пока только в памяти
  */
 public record CallSnapshot(
         String callId,
@@ -24,7 +25,8 @@ public record CallSnapshot(
         List<Gap> gaps,
         Instant serverTime,
         List<Participant> present,
-        List<Participant> left) {
+        List<Participant> left,
+        boolean persistencePending) {
 
     /**
      * @param joinedAt начало учтённого визита; {@code null}, если известно только время выхода
