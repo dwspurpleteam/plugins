@@ -14,7 +14,7 @@ export interface CallSnapshot {
   left: Participant[];
 }
 
-export type CallStatus = 'CONNECTING' | 'TRACKING' | 'RECONNECTING' | 'ENDED' | 'FAILED';
+export type CallStatus = 'CONNECTING' | 'TRACKING' | 'RECONNECTING' | 'ENDED' | 'FAILED' | 'STOPPED';
 
 export interface Participant {
   participantId: string;

@@ -13,8 +13,10 @@ import org.springframework.web.bind.annotation.RestController;
 
 import ru.itmo.plugins.attendance.service.activation.ActivationCommand;
 import ru.itmo.plugins.attendance.service.activation.ActivationException;
+import ru.itmo.plugins.attendance.service.activation.DeactivationCommand;
 import ru.itmo.plugins.attendance.service.tracking.CallRegistry;
 import ru.itmo.plugins.attendance.service.tracking.CallStatus;
+import tools.jackson.databind.JsonNode;
 
 @RestController
 class ControlController {
@@ -33,7 +35,28 @@ class ControlController {
     }
 
     @PostMapping("/control")
-    ControlResponse activate(@RequestBody ActivationCommand command) {
+    ControlResponse control(@RequestBody ControlCommand command) {
+        if (command.operation() == null || "activate".equals(command.operation())) {
+            return activate(new ActivationCommand(command.schemaVersion(), command.activationId(), command.pluginId(),
+                    command.pluginVersion(), command.registryId(), command.callId(), command.activationSecret(),
+                    command.initialContext()));
+        }
+        if (!"deactivate".equals(command.operation()) || !"1.0".equals(command.schemaVersion())
+                || command.activationId() == null || !"attendance".equals(command.pluginId())
+                || blank(command.requestedBy()) || blank(command.activationSecret())) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "Invalid control message or unsupported operation/schema/plugin");
+        }
+        String callId = CallIds.requireValid(command.callId());
+        if (!callId.equals(command.callId())) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "callId must not have surrounding whitespace");
+        }
+        registry.deactivate(new DeactivationCommand(command.schemaVersion(), command.operation(), command.activationId(),
+                callId, command.pluginId(), command.requestedBy(), command.activationSecret()));
+        log.info("Activation {} for call {} deactivated by {}", command.activationId(), callId, command.requestedBy());
+        return new ControlResponse(command.activationId(), callId, CallStatus.STOPPED);
+    }
+
+    private ControlResponse activate(ActivationCommand command) {
         long startedAt = System.nanoTime();
         if (!"1.0".equals(command.schemaVersion()) || command.activationId() == null
                 || !"attendance".equals(command.pluginId()) || blank(command.pluginVersion())
@@ -66,5 +89,14 @@ class ControlController {
     }
 
     record ControlResponse(UUID activationId, String callId, CallStatus status) {
+    }
+
+    record ControlCommand(String operation, String schemaVersion, UUID activationId, String pluginId,
+            String pluginVersion, String registryId, String callId, String activationSecret, JsonNode initialContext,
+            String requestedBy) {
+        @Override
+        public String toString() {
+            return "ControlCommand[operation=" + operation + ", activationId=" + activationId + ", callId=" + callId + "]";
+        }
     }
 }

@@ -220,7 +220,7 @@ function ArchiveCard({ call, download, onDownload }: {
 
 function statusText(call: ArchiveCall): string {
   if (call.endedAt || call.status === 'ENDED') return 'Завершён';
-  if (call.stoppedAt || call.status === 'FAILED') return 'Отслеживание остановлено';
+  if (call.stoppedAt || call.status === 'FAILED' || call.status === 'STOPPED') return 'Отслеживание остановлено';
   if (call.status === 'CONNECTING' || call.status === 'RECONNECTING') return 'Ожидание соединения';
   return 'Идёт звонок';
 }

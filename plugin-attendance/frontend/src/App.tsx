@@ -67,6 +67,7 @@ const STATUS: Record<CallStatus, { text: string; tone: string }> = {
   RECONNECTING: { text: 'Нет связи', tone: 'warn' },
   ENDED: { text: 'Завершён', tone: 'muted' },
   FAILED: { text: 'Ошибка', tone: 'err' },
+  STOPPED: { text: 'Отключён', tone: 'muted' },
 };
 
 function Header({ snapshot }: { snapshot: CallSnapshot | null }) {
@@ -80,7 +81,7 @@ function Header({ snapshot }: { snapshot: CallSnapshot | null }) {
         <div>
           <h1>Посещаемость</h1>
           <p>{snapshot?.status === 'ENDED' ? 'звонок завершён'
-            : snapshot?.status === 'FAILED' || snapshot?.status === 'RECONNECTING'
+            : snapshot?.status === 'FAILED' || snapshot?.status === 'RECONNECTING' || snapshot?.status === 'STOPPED'
               ? 'последний известный состав' : 'в звонке сейчас'}</p>
         </div>
       </div>
@@ -134,6 +135,11 @@ function noticesFor(snapshot: CallSnapshot | null, error: ApiError | null): Noti
       break;
     case 'FAILED':
       notices.push({ tone: 'err', text: `Отслеживание остановлено${reason}` });
+      break;
+    case 'STOPPED':
+      notices.push({ tone: 'info', text: snapshot.stoppedAt
+        ? `Плагин отключён в ${formatTime(snapshot.stoppedAt)}.`
+        : 'Плагин отключён.' });
       break;
     case 'ENDED':
       notices.push({
