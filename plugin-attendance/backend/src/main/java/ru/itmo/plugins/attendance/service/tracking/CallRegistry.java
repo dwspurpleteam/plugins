@@ -10,6 +10,7 @@ import java.util.concurrent.ConcurrentMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.DisposableBean;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -31,13 +32,20 @@ public class CallRegistry implements DisposableBean {
     private final EventSource source;
     private final TrackingProperties properties;
     private final Clock clock;
+    private final AttendanceReportStore reports;
     private final ConcurrentMap<String, CallTracker> trackers = new ConcurrentHashMap<>();
     private final ConcurrentMap<UUID, Activation> activations = new ConcurrentHashMap<>();
 
     public CallRegistry(EventSource source, TrackingProperties properties, Clock clock) {
+        this(source, properties, clock, null);
+    }
+
+    @Autowired
+    public CallRegistry(EventSource source, TrackingProperties properties, Clock clock, AttendanceReportStore reports) {
         this.source = source;
         this.properties = properties;
         this.clock = clock;
+        this.reports = reports;
     }
 
     /** Снимок уже созданной активации; чтение не меняет её жизненный цикл. */
@@ -69,16 +77,16 @@ public class CallRegistry implements DisposableBean {
                 return previous;
             }
             log.debug("Restarting failed activation {} for call {}", command.activationId(), command.callId());
-            trackers.remove(command.callId(), previous.tracker());
             previous.tracker().close();
+            trackers.remove(command.callId(), previous.tracker());
         }
         CallTracker existing = trackers.get(command.callId());
         if (existing != null) {
             if (existing.status() != CallStatus.FAILED && existing.status() != CallStatus.ENDED) {
                 throw new ActivationException(Reason.CONFLICT, "Call already has an attendance activation");
             }
-            trackers.remove(command.callId(), existing);
             existing.close();
+            trackers.remove(command.callId(), existing);
         }
         if (trackers.size() >= properties.maxCalls()) {
             throw new TooManyCallsException(properties.maxCalls());
@@ -86,7 +94,13 @@ public class CallRegistry implements DisposableBean {
         var initialParticipantIds = command.initialParticipantIds();
         log.debug("Creating tracker for activation {} and call {}", command.activationId(), command.callId());
         var tracker = new CallTracker(command.callId(), source.name(), clock,
-                properties.ignoredParticipantPrefixes(), initialParticipantIds);
+                properties.ignoredParticipantPrefixes(), initialParticipantIds, command.activationId(),
+                session -> {
+                    if (reports != null) {
+                        reports.save(command.callId(), session);
+                    }
+                });
+        tracker.checkpoint();
         var activation = new Activation(command, tracker);
         activations.put(command.activationId(), activation);
         trackers.put(command.callId(), tracker);
@@ -107,19 +121,34 @@ public class CallRegistry implements DisposableBean {
     public synchronized void evictStale() {
         Instant now = clock.instant();
         trackers.forEach((callId, tracker) -> {
-            if (tracker.shouldEvict(now, properties.failedRetention())
-                    && trackers.remove(callId, tracker)) {
-                log.info("Stopped tracking call {} ({})", callId, tracker.status());
-                tracker.close();
+            try {
+                tracker.checkpoint();
+                if (tracker.shouldEvict(now, properties.failedRetention())) {
+                    tracker.close();
+                    trackers.remove(callId, tracker);
+                    log.info("Stopped tracking call {} ({})", callId, tracker.status());
+                }
+            } catch (ReportStorageException exception) {
+                log.error("Cannot checkpoint attendance history for call {}", callId, exception);
             }
         });
-        activations.entrySet().removeIf(entry -> entry.getValue().tracker()
-                .shouldEvict(now, properties.failedRetention()));
+        // Failed final writes keep both indexes intact so activation retries can persist the old session.
+        activations.entrySet().removeIf(entry -> trackers.get(entry.getValue().command().callId())
+                != entry.getValue().tracker());
+        if (reports != null) {
+            reports.cleanup();
+        }
     }
 
     @Override
     public void destroy() {
-        trackers.values().forEach(CallTracker::close);
+        trackers.forEach((callId, tracker) -> {
+            try {
+                tracker.close();
+            } catch (ReportStorageException exception) {
+                log.error("Cannot save attendance history when stopping call {}", callId, exception);
+            }
+        });
         trackers.clear();
         activations.clear();
     }

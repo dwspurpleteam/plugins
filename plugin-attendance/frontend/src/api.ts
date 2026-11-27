@@ -1,4 +1,4 @@
-import type { CallSnapshot } from './types';
+import type { ArchivePage, ArchiveQuery, CallSnapshot } from './types';
 
 export class ApiError extends Error {
   /** HTTP-статус; 0, если сервер плагина недоступен. */
@@ -16,24 +16,87 @@ export class ApiError extends Error {
  * Заголовков не добавляем, чтобы запрос из sandbox-iframe оставался простым, без preflight.
  */
 export async function fetchSnapshot(callId: string, signal: AbortSignal): Promise<CallSnapshot> {
-  const response = await request(`api/calls/${encodeURIComponent(callId)}/participants`, { signal });
-  return (await response.json()) as CallSnapshot;
+  return request(`api/calls/${encodeURIComponent(callId)}/participants`, signal,
+    (response) => response.json() as Promise<CallSnapshot>);
 }
 
-async function request(path: string, init: RequestInit): Promise<Response> {
-  let response: Response;
+export type ReportFormat = 'pdf' | 'csv';
+
+export async function fetchArchive(participantId: string, query: ArchiveQuery, signal: AbortSignal): Promise<ArchivePage> {
+  const params = new URLSearchParams({ participantId, timezone: query.timezone });
+  if (query.page !== undefined) params.set('page', String(query.page));
+  if (query.limit !== undefined) params.set('limit', String(query.limit));
+  if (query.from) params.set('from', query.from);
+  if (query.to) params.set('to', query.to);
+  return request(`api/archive?${params}`, signal,
+    response => response.json() as Promise<ArchivePage>);
+}
+
+/** Отчёт читается отдельно от текущего состава: архив доступен и после завершения трекера. */
+export async function downloadReport(callId: string, format: ReportFormat, timezone: string, signal: AbortSignal,
+  participantId?: string): Promise<void> {
+  const query = new URLSearchParams({ format, timezone });
+  const path = participantId !== undefined
+    ? `api/archive/calls/${encodeURIComponent(callId)}/report`
+    : `api/calls/${encodeURIComponent(callId)}/report`;
+  if (participantId !== undefined) query.set('participantId', participantId);
+  let report: { file: Blob; filename: string };
   try {
-    response = await fetch(path, init);
+    report = await request(`${path}?${query}`, signal, async (response) => {
+      const expectedType = format === 'pdf' ? 'application/pdf' : 'text/csv';
+      if (response.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase() !== expectedType) {
+        throw new ApiError('Сервер вернул неподдерживаемый формат отчёта', 502);
+      }
+      const file = await response.blob();
+      if (file.size === 0) throw new ApiError('Сервер вернул пустой отчёт', 502);
+      const filename = response.headers.get('content-disposition')?.match(/filename="([a-zA-Z0-9_.-]{1,180})"/)?.[1]
+        ?? `attendance-${callId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 100)}.${format}`;
+      return { file, filename };
+    }, 30_000);
   } catch (error) {
-    if (init.signal?.aborted) {
-      throw error;
+    if (error instanceof ApiError && error.status === 403) {
+      throw new ApiError('Этот логин не найден среди участников звонка.', 403);
     }
+    if (error instanceof ApiError && error.status === 404) {
+      throw new ApiError('Для этого звонка нет сохранённого отчёта. Возможно, срок хранения истёк.', 404);
+    }
+    throw error;
+  }
+  signal.throwIfAborted();
+  const url = URL.createObjectURL(report.file);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = report.filename;
+  document.body.append(link);
+  try {
+    link.click();
+  } finally {
+    link.remove();
+    // Даём браузеру начать чтение Blob перед освобождением URL.
+    globalThis.setTimeout(() => URL.revokeObjectURL(url), 30_000);
+  }
+}
+
+/** The timeout covers both response headers and reading the body. */
+async function request<T>(path: string, signal: AbortSignal, read: (response: Response) => Promise<T>,
+  timeoutMs = 10_000): Promise<T> {
+  const timeout = new AbortController();
+  const timer = globalThis.setTimeout(() => timeout.abort(), timeoutMs);
+  try {
+    const response = await fetch(path, { signal: AbortSignal.any([signal, timeout.signal]), cache: 'no-store' });
+    if (!response.ok) throw new ApiError(await problemDetail(response), response.status);
+    const result = await read(response);
+    signal.throwIfAborted();
+    timeout.signal.throwIfAborted();
+    return result;
+  } catch (error) {
+    if (signal.aborted) throw error;
+    if (timeout.signal.aborted) throw new ApiError('Сервер не ответил вовремя. Повторите запрос', 0);
+    if (error instanceof ApiError) throw error;
     throw new ApiError('Нет связи с сервером плагина', 0);
+  } finally {
+    globalThis.clearTimeout(timer);
   }
-  if (!response.ok) {
-    throw new ApiError(await problemDetail(response), response.status);
-  }
-  return response;
 }
 
 async function problemDetail(response: Response): Promise<string> {

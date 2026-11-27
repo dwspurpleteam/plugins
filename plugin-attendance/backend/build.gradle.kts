@@ -37,6 +37,7 @@ dependencies {
     implementation(libs.plugin.sdk)
     implementation(libs.spring.boot.starter.webmvc)
     implementation(libs.spring.boot.starter.actuator)
+    implementation(libs.pdfbox)
 
     testImplementation(libs.spring.boot.starter.test)
     testImplementation(libs.grpc.netty.shaded)
@@ -86,6 +87,20 @@ val frontendBuild = tasks.register<NpmTask>("frontendBuild") {
         frontendDir.file("vite.config.ts"),
     )
     outputs.dir(frontendDir.dir("dist"))
+}
+
+val frontendTest = tasks.register<NpmTask>("frontendTest") {
+    group = "verification"
+    description = "Проверяет сетевые запросы и скачивание отчётов без дополнительных npm-зависимостей."
+    dependsOn(tasks.npmInstall)
+    npmCommand = listOf("test")
+    inputs.dir(frontendDir.dir("src"))
+    inputs.dir(frontendDir.dir("test"))
+    inputs.files(frontendDir.file("package.json"), frontendDir.file("package-lock.json"))
+}
+
+tasks.check {
+    dependsOn(frontendTest)
 }
 
 tasks.processResources {

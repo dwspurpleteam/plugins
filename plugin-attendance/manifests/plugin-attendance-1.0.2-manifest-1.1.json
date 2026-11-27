@@ -1,0 +1,26 @@
+{
+  "manifest-version": "1.1",
+  "plugin-id": "attendance",
+  "plugin-version": "1.0.2",
+  "name": "Плагин посещаемости",
+  "description": "Учёт посещаемости звонков, архив и выгрузка отчётов в PDF/CSV",
+  "frontend": {
+    "url-web": "https://calls.vareonix.cc/apps/plugin-attendance/"
+  },
+  "backend": {
+    "health-url": "https://calls.vareonix.cc/apps/plugin-attendance/actuator/health",
+    "control-url": "https://calls.vareonix.cc/apps/plugin-attendance/control",
+    "initial-state": ["participants"],
+    "events": {
+      "available-event-types": [
+        "participant.joined",
+        "participant.left",
+        "call.ended"
+      ]
+    },
+    "media": {
+      "input": [],
+      "output": []
+    }
+  }
+}

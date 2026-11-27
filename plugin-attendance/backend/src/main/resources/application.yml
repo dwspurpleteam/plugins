@@ -13,6 +13,10 @@ management:
         include: health, info
 
 attendance:
+  reports:
+    directory: ${ATTENDANCE_REPORTS_DIRECTORY:./data/attendance}
+    retention: 30d
+
   # Рабочий источник событий. Фейковый источник существует только в тестах.
   source: streamapi
 

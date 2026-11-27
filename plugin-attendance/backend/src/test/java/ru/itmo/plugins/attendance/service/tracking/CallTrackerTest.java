@@ -8,6 +8,9 @@ import static ru.itmo.plugins.attendance.service.events.CallEventType.PARTICIPAN
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.ArrayList;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
 
 import org.junit.jupiter.api.Test;
 
@@ -127,6 +130,157 @@ class CallTrackerTest {
         CallSnapshot snapshot = tracker.snapshot();
         assertThat(snapshot.present()).containsExactly(new Participant("anna", at(30), null));
         assertThat(snapshot.left()).isEmpty();
+        assertThat(tracker.reportSession().visits()).containsExactly(
+                new AttendanceReport.Visit("anna", at(10), at(20), false, "participant_left"),
+                new AttendanceReport.Visit("anna", at(30), null, false, null));
+    }
+
+    @Test
+    void reportDistinguishesSeededVisitsAndCallEndFromObservedEntryAndExit() {
+        var seeded = new CallTracker(CALL, "test", clock, List.of(), List.of("anna"));
+        seeded.onConnected();
+        seeded.onEvent(event(PARTICIPANT_JOINED, "boris", 10));
+        seeded.onEvent(event(PARTICIPANT_LEFT, "boris", 20));
+        seeded.onEvent(event(CALL_ENDED, "", 30));
+
+        assertThat(seeded.reportSession().visits()).containsExactly(
+                new AttendanceReport.Visit("anna", START, at(30), true, "call_ended"),
+                new AttendanceReport.Visit("boris", at(10), at(20), false, "participant_left"));
+    }
+
+    @Test
+    void reportRetainsAllConnectionGaps() {
+        tracker.onConnected();
+        for (int i = 0; i < 25; i++) {
+            tracker.onDisconnected("outage");
+            clock.advance(Duration.ofSeconds(1));
+            tracker.onConnected();
+        }
+        assertThat(tracker.reportSession().gaps()).hasSize(25);
+    }
+
+    @Test
+    void reportSnapshotDoesNotChangeAfterFurtherEvents() {
+        tracker.onEvent(event(PARTICIPANT_JOINED, "anna", 10));
+        var report = tracker.reportSession();
+        tracker.onEvent(event(PARTICIPANT_LEFT, "anna", 20));
+        assertThat(report.visits()).containsExactly(new AttendanceReport.Visit("anna", at(10), null, false, null));
+    }
+
+    @Test
+    void persistenceFailureDoesNotCloseLiveSubscriptionAndTerminalCallbacksStillCloseOutsideLock() {
+        List<Consumer<CallTracker>> actions = List.of(
+                candidate -> candidate.onEvent(event(PARTICIPANT_JOINED, "anna", 10)),
+                candidate -> candidate.onEvent(event(CALL_ENDED, "", 10)),
+                candidate -> candidate.onFailed("source failed"),
+                candidate -> candidate.onDisconnected("network failed"),
+                CallTracker::onConnected,
+                CallTracker::close);
+        for (var action : actions) {
+            AtomicBoolean failWrites = new AtomicBoolean();
+            AtomicBoolean subscriptionClosed = new AtomicBoolean();
+            var candidate = new CallTracker(CALL, "test", clock, List.of(), List.of(), null, session -> {
+                if (failWrites.get()) {
+                    throw new ReportStorageException("disk full");
+                }
+            });
+            candidate.onConnected();
+            candidate.attach(() -> {
+                assertThat(Thread.holdsLock(candidate)).as("SDK close must run outside tracker lock").isFalse();
+                subscriptionClosed.set(true);
+            });
+            clock.advance(Duration.ofSeconds(1));
+            failWrites.set(true);
+
+            if (action == actions.getLast()) {
+                org.assertj.core.api.Assertions.assertThatThrownBy(() -> action.accept(candidate))
+                        .isInstanceOf(ReportStorageException.class);
+            } else {
+                action.accept(candidate);
+            }
+            var snapshot = candidate.snapshot();
+            assertThat(snapshot.persistencePending()).isTrue();
+            assertThat(subscriptionClosed.get()).isEqualTo(snapshot.stoppedAt() != null);
+            if (snapshot.stoppedAt() == null) assertThat(snapshot.status()).isNotEqualTo(CallStatus.FAILED);
+        }
+    }
+
+    @Test
+    void failedFinalWriteCanBeRetriedWithoutChangingCallEndOrObservationTime() {
+        var saved = new ArrayList<AttendanceReport.Session>();
+        AtomicBoolean fail = new AtomicBoolean();
+        var candidate = new CallTracker(CALL, "test", clock, List.of(), List.of(), null, session -> {
+            if (fail.get()) throw new ReportStorageException("disk full");
+            saved.add(session);
+        });
+        candidate.onConnected();
+        clock.advance(Duration.ofSeconds(10));
+        fail.set(true);
+        candidate.onEvent(event(CALL_ENDED, "", 10));
+        var ended = candidate.reportSession();
+        assertThat(ended.status()).isEqualTo(CallStatus.ENDED);
+        assertThat(ended.capturedAt()).isEqualTo(at(10));
+
+        clock.advance(Duration.ofMinutes(5));
+        fail.set(false);
+        candidate.checkpoint();
+        assertThat(saved.getLast()).isEqualTo(ended);
+        assertThat(candidate.snapshot().persistencePending()).isFalse();
+        int writes = saved.size();
+        clock.advance(Duration.ofMinutes(5));
+        candidate.checkpoint();
+        candidate.close();
+        assertThat(saved).hasSize(writes);
+    }
+
+    @Test
+    void keepsEveryVisitDuringOutageAndRetriesWithLatestHistoryWithoutRestartingSubscription() {
+        var saved = new ArrayList<AttendanceReport.Session>();
+        AtomicBoolean fail = new AtomicBoolean();
+        AtomicBoolean closed = new AtomicBoolean();
+        int[] attempts = { 0 };
+        var candidate = new CallTracker(CALL, "test", clock, List.of(), List.of(), null, session -> {
+            attempts[0]++;
+            if (fail.get()) throw new ReportStorageException("disk full");
+            saved.add(session);
+        });
+        candidate.onConnected();
+        candidate.attach(() -> closed.set(true));
+        fail.set(true);
+        candidate.onEvent(event(PARTICIPANT_JOINED, "anna", 0));
+        int failedAttempts = attempts[0];
+        clock.advance(Duration.ofSeconds(1));
+        candidate.onEvent(event(PARTICIPANT_LEFT, "anna", 1));
+        candidate.onEvent(event(PARTICIPANT_JOINED, "boris", 1));
+        assertThat(attempts[0]).isEqualTo(failedAttempts);
+        assertThat(candidate.snapshot().status()).isEqualTo(CallStatus.TRACKING);
+        assertThat(candidate.snapshot().persistencePending()).isTrue();
+        assertThat(candidate.snapshot().stoppedAt()).isNull();
+        assertThat(closed).isFalse();
+
+        clock.advance(Duration.ofSeconds(4));
+        fail.set(false);
+        candidate.onEvent(event(PARTICIPANT_JOINED, "anna", 5));
+        assertThat(candidate.snapshot().persistencePending()).isFalse();
+        assertThat(saved.getLast().visits()).hasSize(3);
+        assertThat(saved.getLast().visits().getFirst().leftAt()).isEqualTo(at(1));
+        assertThat(saved.getLast().visits()).extracting(AttendanceReport.Visit::participantId)
+                .containsExactly("anna", "boris", "anna");
+        assertThat(closed).isFalse();
+    }
+
+    @Test
+    void connectedCallbackStillCompletesReadinessWhenStorageIsTemporarilyUnavailable() {
+        AtomicBoolean fail = new AtomicBoolean(true);
+        var candidate = new CallTracker(CALL, "test", clock, List.of(), List.of(), null, session -> {
+            if (fail.get()) throw new ReportStorageException("disk full");
+        });
+        candidate.onConnected();
+        assertThat(candidate.awaitConnected(Duration.ofMillis(1)).status()).isEqualTo(CallStatus.TRACKING);
+        assertThat(candidate.snapshot().persistencePending()).isTrue();
+        fail.set(false);
+        candidate.checkpoint();
+        assertThat(candidate.snapshot().persistencePending()).isFalse();
     }
 
     @Test
@@ -237,6 +391,19 @@ class CallTrackerTest {
         assertThat(snapshot.status()).isEqualTo(CallStatus.FAILED);
         assertThat(snapshot.statusMessage()).isEqualTo("INVALID_ARGUMENT: invalid event subscription");
         assertThat(subscription.closed()).isTrue();
+    }
+
+    @Test
+    void failedSnapshotKeepsObservationStopTimeWhileServerClockAdvances() {
+        tracker.onConnected();
+        tracker.onEvent(event(PARTICIPANT_JOINED, "anna", 0));
+        clock.advance(Duration.ofSeconds(10));
+        tracker.onFailed("source failed");
+        clock.advance(Duration.ofMinutes(1));
+
+        assertThat(tracker.snapshot().stoppedAt()).isEqualTo(at(10));
+        assertThat(tracker.snapshot().serverTime()).isEqualTo(at(70));
+        assertThat(tracker.snapshot().present()).hasSize(1);
     }
 
     @Test
